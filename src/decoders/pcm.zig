@@ -1,4 +1,5 @@
 //! Container-independent PCM sample decoding into interleaved f32 output.
+//! Integer samples are normalized to [-1, 1]
 const std = @import("std");
 const types = @import("../types.zig");
 const SeekableReader = @import("../SeekableReader.zig");
@@ -12,22 +13,25 @@ pub const Decoder = struct {
     // A failed seek is replayed by read until a later seek succeeds.
     failure: ?(types.ReadError || types.SeekError || error{TruncatedData}) = null,
 
+    /// Validate the PCM range and seek to its start; data must contain whole frames.
+    /// Borrows source: keep its reader and buffer in place and input open and unchanged.
     pub fn init(source: SeekableReader, data: types.DataRange, channels: u16, format: types.PcmFormat) (types.DecodeError || types.SeekError || types.SizeError)!Decoder {
         if (channels == 0) return error.InvalidData;
         const frame_bytes = @as(usize, channels) * format.sample_type.byteSize();
         if (data.length % frame_bytes != 0) return error.InvalidData;
-        if (format.valid_bits) |valid_bits| {
-            if (valid_bits == 0 or valid_bits > format.sample_type.byteSize() * 8) return error.InvalidData;
-        }
+        try validateFormat(format);
         if (try data.end() > try source.getSize()) return error.TruncatedData;
         try source.seekTo(data.offset);
         return .{ .source = source, .data = data, .format = format, .channels = channels };
     }
 
+    /// Return the total number of frames in the PCM range.
     pub fn frameCount(self: Decoder) u64 {
         return self.data.length / (@as(u64, self.channels) * self.format.sample_type.byteSize());
     }
 
+    /// Seek to an absolute frame within the PCM range, clearing prior errors on success.
+    /// frameCount() is EOF; larger positions return OutOfRange.
     pub fn seekFrame(self: *Decoder, frame: u64) (types.DecodeError || types.SeekError)!void {
         if (frame > self.frameCount()) return error.OutOfRange;
         // init checked the range end. An in-range frame cannot overflow it.
@@ -41,6 +45,8 @@ pub const Decoder = struct {
     }
 
     /// Returns frames written, leaving the rest of out untouched. Zero is EOF.
+    /// out must be nonempty and its length a multiple of the channel count.
+    /// After an input error, discard output and seek successfully before reading again.
     pub fn read(self: *Decoder, out: []f32) (types.DecodeError || types.ReadError || types.SeekError)!usize {
         if (out.len == 0 or out.len % self.channels != 0) return error.InvalidBufferSize;
         if (self.failure) |err| return err;
@@ -70,6 +76,14 @@ pub const Decoder = struct {
     }
 };
 
+/// Return InvalidData if valid_bits is zero or exceeds the sample storage width.
+pub fn validateFormat(format: types.PcmFormat) error{InvalidData}!void {
+    if (format.valid_bits) |valid_bits| {
+        if (valid_bits == 0 or valid_bits > format.sample_type.byteSize() * 8) return error.InvalidData;
+    }
+}
+
+/// Convert one encoded sample to f32; bytes must contain a full sample.
 fn decodeSample(bytes: []const u8, format: types.PcmFormat) f32 {
     const endian = format.byte_order;
     return switch (format.sample_type) {

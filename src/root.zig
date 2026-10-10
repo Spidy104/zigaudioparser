@@ -1,9 +1,12 @@
-//! Container metadata parsing and sample decoding into interleaved f32 PCM.
+//! Audio container parsing and sample decoding into interleaved f32 PCM.
 pub const parse = @import("parsers.zig").parse;
+pub const wave64 = @import("parsers/wave64.zig");
 pub const wav = @import("parsers/wav.zig");
 pub const Decoder = @import("Decoder.zig");
 pub const SeekableReader = @import("SeekableReader.zig");
 pub const DataRange = @import("types.zig").DataRange;
+pub const AudioData = @import("types.zig").AudioData;
+pub const Segment = @import("types.zig").Segment;
 pub const Info = @import("types.zig").Info;
 pub const Format = @import("types.zig").Format;
 pub const DecodeError = @import("types.zig").DecodeError;

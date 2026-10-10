@@ -14,15 +14,15 @@ zig build run -- path/to/audio.wav
 The goal is to support the audio containers, streams, and codecs supported by FFmpeg.
 
 - [ ] create man pages
-- [ ] write unit tests
+- [ ] create unit tests
 
-### WAV container (currently in progress)
+### WAV container (done)
 
-- [ ] RF64.
-- [ ] BW64.
-- [ ] RIFX.
-- [ ] Wave64.
-- [ ] Segmented audio.
+- [x] RF64 audio reading.
+- [x] BW64 audio reading.
+- [x] RIFX.
+- [x] Wave64.
+- [x] Segmented RIFF/RIFX audio (`LIST/wavl`, `data`, `slnt`).
 
 ### Decoder support
 
@@ -31,6 +31,19 @@ The goal is to support the audio containers, streams, and codecs supported by FF
 - [ ] Codec state reset and seeking.
 - [ ] Decoder delay and trailing sample trimming.
 - [ ] Channel mapping and sample conversion.
+
+### Metadata
+
+- [ ] RIFF `LIST/INFO` tag reading.
+- [ ] Technical metadata: stream properties, channel layouts, and codec configuration.
+- [ ] Playback timing: encoder delay, end padding, and pre-skip.
+- [ ] Loudness and gain: ReplayGain, R128, and format-defined output gain.
+- [ ] Descriptive tags: title, artist, album, track number, dates, comments, and lyrics across
+      formats.
+- [ ] Embedded artwork.
+- [ ] Navigation: seek tables, cue sheets, chapters, and markers.
+- [ ] Production metadata: recording origin, timestamps, and coding history.
+- [ ] Spatial metadata: ADM.
 
 ### Lossy codecs
 

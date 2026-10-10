@@ -37,11 +37,13 @@ pub fn fromFixed(reader: *std.Io.Reader) SeekableReader {
     return .{ .reader = reader, .vtable = &.{ .seekTo = fixedSeek, .getSize = fixedSize } };
 }
 
+/// Seek a file reader and update its buffered position.
 fn fileSeek(reader: *std.Io.Reader, offset: u64) types.SeekError!void {
     const file: *std.Io.File.Reader = @fieldParentPtr("interface", reader);
     try file.seekTo(offset);
 }
 
+/// Return file size, reporting Unseekable for streaming input.
 fn fileSize(reader: *std.Io.Reader) types.SizeError!u64 {
     const file: *std.Io.File.Reader = @fieldParentPtr("interface", reader);
     return file.getSize() catch |err| switch (err) {
@@ -50,11 +52,13 @@ fn fileSize(reader: *std.Io.Reader) types.SizeError!u64 {
     };
 }
 
+/// Set a fixed reader's position; offsets beyond its buffer return EndOfStream.
 fn fixedSeek(reader: *std.Io.Reader, offset: u64) types.SeekError!void {
     if (offset > reader.end) return error.EndOfStream;
     reader.seek = @intCast(offset);
 }
 
+/// Return the full input length of a fixed reader.
 fn fixedSize(reader: *std.Io.Reader) types.SizeError!u64 {
     return reader.end;
 }

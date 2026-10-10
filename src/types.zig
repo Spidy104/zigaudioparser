@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// Audio container type.
-pub const Format = enum { wav };
+pub const Format = enum { wav, wave64 };
 
 pub const PcmSampleType = enum {
     unsigned8,
@@ -52,11 +52,14 @@ pub const DataRange = struct {
     }
 };
 
-/// Parsed metadata and encoded audio range.
+pub const AudioData = @import("AudioData.zig");
+pub const Segment = AudioData.Segment;
+
+/// Parsed metadata and borrowed audio segments.
 pub const ParsedAudio = struct {
     info: Info,
     scheme: DecodingScheme,
-    data: DataRange,
+    data: AudioData,
 };
 
 /// Audio metadata.
@@ -75,7 +78,7 @@ pub const Info = struct {
     }
 };
 
-/// Container detection and metadata errors, independent of source I/O.
+/// Container detection and metadata errors
 pub const ParseError = error{
     UnsupportedFormat,
     UnsupportedChunkLayout,
@@ -83,7 +86,7 @@ pub const ParseError = error{
     TruncatedData,
 };
 
-/// Sample decoding and decoder usage errors, independent of source I/O.
+/// Sample decoding and decoder usage errors
 pub const DecodeError = error{
     UnsupportedEncoding,
     InvalidData,
@@ -96,5 +99,5 @@ pub const ReadError = std.Io.Reader.Error;
 pub const SeekError = std.Io.File.Reader.SeekError;
 pub const SizeError = std.Io.File.Reader.SizeError || error{Unseekable};
 
-/// Errors from accessing the source, independent of audio format.
+/// Errors from accessing the source
 pub const IoError = ReadError || SeekError || SizeError;

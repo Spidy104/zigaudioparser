@@ -2,6 +2,7 @@
 const std = @import("std");
 const zaudio = @import("zaudio");
 
+/// Decode the file named by the sole argument and print its format and frame count.
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
