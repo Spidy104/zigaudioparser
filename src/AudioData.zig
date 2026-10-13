@@ -11,7 +11,7 @@ pub const Segment = union(enum) {
     silence: u64,
 
     /// Return frames using block_align bytes per frame; reject zero alignment or partial frames.
-    pub fn frameCount(self: Segment, block_align: u32) error{InvalidData}!u64 {
+    pub fn frameCount(self: Segment, block_align: u32) types.ValidationError!u64 {
         if (block_align == 0) return error.InvalidData;
         return switch (self) {
             .data => |range| {
@@ -43,7 +43,7 @@ pub fn iterate(self: AudioData, source: SeekableReader) Iterator {
 
 /// Validate segment bounds and sum frames for a fixed-width encoding.
 /// block_align is bytes per frame and must be nonzero. May reposition source.
-pub fn frameCount(self: AudioData, source: SeekableReader, block_align: u32) (types.ParseError || types.IoError)!u64 {
+pub fn frameCount(self: AudioData, source: SeekableReader, block_align: u32) types.ParserError!u64 {
     if (block_align == 0) return error.InvalidData;
     const size = try source.getSize();
     var segments = self.iterate(source);
@@ -62,7 +62,7 @@ pub const Iterator = struct {
     },
 
     /// Return the next segment, including empty ones; null means end of input.
-    pub fn next(self: *Iterator) (types.ParseError || types.IoError)!?Segment {
+    pub fn next(self: *Iterator) types.ParserError!?Segment {
         switch (self.state) {
             .single => |*segment| {
                 const result = segment.*;

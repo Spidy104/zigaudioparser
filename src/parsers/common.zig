@@ -2,7 +2,7 @@
 const types = @import("../types.zig");
 const SeekableReader = @import("../SeekableReader.zig");
 
-pub const ParseError = types.ParseError || types.IoError;
+pub const ParseError = types.ParserError;
 
 /// A logical FourCC chunk header with a resolved payload size
 pub const ChunkHeader = struct {

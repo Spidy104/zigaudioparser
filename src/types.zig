@@ -47,7 +47,7 @@ pub const DataRange = struct {
     length: u64 = 0,
 
     /// Return byte offset just past the range, overflow returns InvalidData.
-    pub fn end(self: DataRange) error{InvalidData}!u64 {
+    pub fn end(self: DataRange) ValidationError!u64 {
         return std.math.add(u64, self.offset, self.length) catch error.InvalidData;
     }
 };
@@ -69,14 +69,20 @@ pub const Info = struct {
     channels: u16,
     /// One frame contains one sample for each channel. Null if unknown.
     total_frames: ?u64,
+    /// True when decoded output has changed sample rate.
+    variable_sample_rate: bool = false,
 
-    /// Return duration in seconds, null if frame count is unknown.
+    /// Return duration in seconds, null if frame count is unknown or rate has changed.
     /// Sample rate must be nonzero.
     pub fn durationSeconds(self: Info) ?f64 {
+        if (self.variable_sample_rate) return null;
         const frames = self.total_frames orelse return null;
         return @as(f64, @floatFromInt(frames)) / @as(f64, @floatFromInt(self.sample_rate));
     }
 };
+
+/// Invalid audio metadata, sample format, or byte range.
+pub const ValidationError = error{InvalidData};
 
 /// Container detection and metadata errors
 pub const ParseError = error{
@@ -93,11 +99,22 @@ pub const DecodeError = error{
     TruncatedData,
     InvalidBufferSize,
     OutOfRange,
+    LimitExceeded,
+    InvalidState,
+    FormatChanged,
 };
 
 pub const ReadError = std.Io.Reader.Error;
 pub const SeekError = std.Io.File.Reader.SeekError;
+/// Seeking a source whose seek callback may be unavailable.
+pub const SourceSeekError = SeekError || error{Unseekable};
 pub const SizeError = std.Io.File.Reader.SizeError || error{Unseekable};
 
 /// Errors from accessing the source
 pub const IoError = ReadError || SeekError || SizeError;
+
+/// Complete container parser errors, including source access.
+pub const ParserError = ParseError || IoError;
+
+/// Complete decoder pipeline errors, including parsing, I/O, and allocation.
+pub const DecoderError = ParseError || DecodeError || IoError || std.mem.Allocator.Error;

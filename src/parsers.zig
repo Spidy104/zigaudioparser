@@ -17,7 +17,7 @@ const probe_size = blk: {
 /// Read audio metadata from start of input. The result describes audio segments;
 /// initialize a decoder or segment iterator before reading samples.
 /// Keep input unchanged while using returned ranges. Source position is unspecified on error.
-pub fn parse(source: SeekableReader) (types.ParseError || types.IoError)!types.ParsedAudio {
+pub fn parse(source: SeekableReader) types.ParserError!types.ParsedAudio {
     const size: usize = @intCast(@min(try source.getSize(), probe_size));
     try source.seekTo(0);
     var prefix: [probe_size]u8 = undefined;
@@ -25,7 +25,7 @@ pub fn parse(source: SeekableReader) (types.ParseError || types.IoError)!types.P
     return dispatch(source, prefix[0..size]);
 }
 
-fn dispatch(source: SeekableReader, prefix: []const u8) common.ParseError!types.ParsedAudio {
+fn dispatch(source: SeekableReader, prefix: []const u8) types.ParserError!types.ParsedAudio {
     inline for (containers) |container| {
         if (container.probe(prefix)) {
             try source.seekTo(0);

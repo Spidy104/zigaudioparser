@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     defer file.close(init.io);
     var input_buffer: [64 * 1024]u8 = undefined;
     var reader = file.reader(init.io, &input_buffer);
-    var decoder = try zaudio.Decoder.init(zaudio.SeekableReader.fromFile(&reader));
+    var decoder = try zaudio.Decoder.init(allocator, zaudio.Source.fromFile(&reader));
     defer decoder.deinit();
     const info = decoder.info();
     const samples = try allocator.alloc(f32, @as(usize, info.channels) * 1024);

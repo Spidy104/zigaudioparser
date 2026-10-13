@@ -5,7 +5,7 @@ const types = @import("../types.zig");
 const SeekableReader = @import("../SeekableReader.zig");
 
 const common = @import("common.zig");
-pub const Error = common.ParseError;
+pub const Error = types.ParserError;
 const readRequired = common.readRequired;
 
 pub const ChunkHeader = common.ChunkHeader;

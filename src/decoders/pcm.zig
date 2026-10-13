@@ -1,83 +1,33 @@
-//! Container-independent PCM sample decoding into interleaved f32 output.
-//! Integer samples are normalized to [-1, 1]
+//! Container-independent PCM conversion into interleaved f32 samples.
 const std = @import("std");
 const types = @import("../types.zig");
-const SeekableReader = @import("../SeekableReader.zig");
+const decoding = @import("../decoding.zig");
 
-pub const Decoder = struct {
-    source: SeekableReader,
-    data: types.DataRange,
-    format: types.PcmFormat,
-    channels: u16,
-    frame_offset: u64 = 0,
-    // A failed seek is replayed by read until a later seek succeeds.
-    failure: ?(types.ReadError || types.SeekError || error{TruncatedData}) = null,
+format: types.PcmFormat,
+channels: u16,
 
-    /// Validate the PCM range and seek to its start; data must contain whole frames.
-    /// Borrows source: keep its reader and buffer in place and input open and unchanged.
-    pub fn init(source: SeekableReader, data: types.DataRange, channels: u16, format: types.PcmFormat) (types.DecodeError || types.SeekError || types.SizeError)!Decoder {
-        if (channels == 0) return error.InvalidData;
-        const frame_bytes = @as(usize, channels) * format.sample_type.byteSize();
-        if (data.length % frame_bytes != 0) return error.InvalidData;
-        try validateFormat(format);
-        if (try data.end() > try source.getSize()) return error.TruncatedData;
-        try source.seekTo(data.offset);
-        return .{ .source = source, .data = data, .format = format, .channels = channels };
-    }
+/// Describe complete PCM frames after validating the sample format.
+pub fn scheme(format: types.PcmFormat, channels: u16) decoding.Error!decoding.InputScheme {
+    if (channels == 0) return error.InvalidData;
+    try validateFormat(format);
+    return .{ .samples = @as(u32, channels) * @as(u32, @intCast(format.sample_type.byteSize())) };
+}
 
-    /// Return the total number of frames in the PCM range.
-    pub fn frameCount(self: Decoder) u64 {
-        return self.data.length / (@as(u64, self.channels) * self.format.sample_type.byteSize());
-    }
+/// Convert a complete batch; out must have room for every sample.
+pub fn decodeUnit(self: *@This(), input: []const u8, out: []f32) decoding.Error!usize {
+    const size = self.format.sample_type.byteSize();
+    if (input.len % (size * self.channels) != 0) return error.InvalidData;
+    const samples = input.len / size;
+    if (out.len < samples) return error.InvalidBufferSize;
+    for (out[0..samples], 0..) |*sample, i| sample.* = decodeSample(input[i * size ..][0..size], self.format);
+    return samples / self.channels;
+}
 
-    /// Seek to an absolute frame within the PCM range, clearing prior errors on success.
-    /// frameCount() is EOF; larger positions return OutOfRange.
-    pub fn seekFrame(self: *Decoder, frame: u64) (types.DecodeError || types.SeekError)!void {
-        if (frame > self.frameCount()) return error.OutOfRange;
-        // init checked the range end. An in-range frame cannot overflow it.
-        const offset = self.data.offset + frame * self.channels * self.format.sample_type.byteSize();
-        self.source.seekTo(offset) catch |err| {
-            self.failure = err;
-            return err;
-        };
-        self.frame_offset = frame;
-        self.failure = null;
-    }
-
-    /// Returns frames written, leaving the rest of out untouched. Zero is EOF.
-    /// out must be nonempty and its length a multiple of the channel count.
-    /// After an input error, discard output and seek successfully before reading again.
-    pub fn read(self: *Decoder, out: []f32) (types.DecodeError || types.ReadError || types.SeekError)!usize {
-        if (out.len == 0 or out.len % self.channels != 0) return error.InvalidBufferSize;
-        if (self.failure) |err| return err;
-        const sample_bytes = self.format.sample_type.byteSize();
-        const frames: usize = @intCast(@min(out.len / self.channels, self.frameCount() - self.frame_offset));
-        const samples = frames * self.channels;
-        var scratch: [8192]u8 = undefined;
-        var written: usize = 0;
-        while (written < samples) {
-            const count = @min(samples - written, scratch.len / sample_bytes);
-            const input = scratch[0 .. count * sample_bytes];
-            self.source.reader.readSliceAll(input) catch |err| {
-                const failure = switch (err) {
-                    error.EndOfStream => error.TruncatedData,
-                    else => |e| e,
-                };
-                self.failure = failure;
-                return failure;
-            };
-            for (out[written..][0..count], 0..) |*sample, i| {
-                sample.* = decodeSample(input[i * sample_bytes ..][0..sample_bytes], self.format);
-            }
-            written += count;
-        }
-        self.frame_offset += frames;
-        return frames;
-    }
-};
+/// PCM samples carry no decoding history.
+pub fn reset(_: *@This()) void {}
 
 /// Return InvalidData if valid_bits is zero or exceeds the sample storage width.
-pub fn validateFormat(format: types.PcmFormat) error{InvalidData}!void {
+pub fn validateFormat(format: types.PcmFormat) types.ValidationError!void {
     if (format.valid_bits) |valid_bits| {
         if (valid_bits == 0 or valid_bits > format.sample_type.byteSize() * 8) return error.InvalidData;
     }

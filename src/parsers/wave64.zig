@@ -4,7 +4,7 @@ const types = @import("../types.zig");
 const SeekableReader = @import("../SeekableReader.zig");
 const common = @import("common.zig");
 const wave_format = @import("wave_format.zig");
-pub const ParseError = common.ParseError;
+pub const ParseError = types.ParserError;
 pub const FormatChunk = wave_format.FormatChunk;
 
 pub const Guid = [16]u8;

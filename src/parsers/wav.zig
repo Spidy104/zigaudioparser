@@ -76,7 +76,7 @@ pub const WavFile = struct {
     }
 };
 
-pub const ParseError = types.ParseError || types.IoError;
+pub const ParseError = types.ParserError;
 
 /// Bytes useful for identifying this container family. A recognized short
 /// prefix is dispatched so parse() can report a truncated header.

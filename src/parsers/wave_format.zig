@@ -5,7 +5,7 @@ const SeekableReader = @import("../SeekableReader.zig");
 const common = @import("common.zig");
 const ChunkHeader = common.ChunkHeader;
 const readRequired = common.readRequired;
-pub const ParseError = common.ParseError;
+pub const ParseError = types.ParserError;
 
 /// WAVE encoding tag; unknown values are preserved.
 pub const FormatTag = enum(u16) {
