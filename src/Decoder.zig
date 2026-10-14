@@ -1,25 +1,31 @@
-//! Shared packet decoding into interleaved f32 samples in source channel order.
-//! Integer PCM is normalized to [-1, 1]; floating-point samples retain their scale.
+//! User-facing read/seek pipeline: container packets, codec output, and
+//! trimming.
+//! Returns interleaved f32 samples in source channel order.
+//! Integer PCM is normalized to [-1, 1]; floating-point samples retain their
+//! scale.
 const std = @import("std");
 const types = @import("types.zig");
-const decoding = @import("decoding.zig");
 const Source = @import("Source.zig");
 const PacketSource = @import("PacketSource.zig");
 const Codec = @import("Codec.zig");
 const Decoder = @This();
 
 pub const Error = types.DecoderError;
-pub const Options = decoding.Options;
+pub const Options = types.Options;
 
 allocator: std.mem.Allocator,
 packets: PacketSource,
 codec: Codec,
 metadata: types.Info,
-format: decoding.AudioFormat,
-presentation: decoding.Presentation,
+format: types.AudioFormat,
+presentation: types.Presentation,
+/// Fixed history storage allocated at initialization. Only format.channels
+/// samples are active; retained for WAVE slnt events (repeat the previous
+/// frame).
 last_frame: []f32,
+/// Borrows unread codec output; read copies it to the caller's output slice.
 pending: []const f32 = &.{},
-deferred_block: ?decoding.AudioBlock = null,
+deferred_block: ?types.AudioBlock = null,
 silence: u64 = 0,
 decoded_frame: i128 = 0,
 discard_until: ?u64 = null,
@@ -27,40 +33,61 @@ frame_offset: u64 = 0,
 draining: bool = false,
 finished: bool = false,
 format_notice: bool = false,
-pending_format: ?decoding.AudioFormat = null,
+pending_format: ?types.AudioFormat = null,
 failure: ?Error = null,
 
 /// Open audio, borrowing exclusive source access until deinit.
 /// Keep the source reader and buffer in place and input open and unchanged.
+/// Allocates pipeline state and buffers during initialization.
+/// deinit releases all owned storage.
 pub fn init(allocator: std.mem.Allocator, source: Source) Error!Decoder {
     return initOptions(allocator, source, .{});
 }
 
-/// Open audio with explicit input gathering limits.
-pub fn initOptions(allocator: std.mem.Allocator, source: Source, options: Options) Error!Decoder {
-    return initPackets(allocator, try PacketSource.init(allocator, source, options), options);
+/// Open audio with explicit buffer capacities and input/index limits.
+pub fn initOptions(
+    allocator: std.mem.Allocator,
+    source: Source,
+    options: Options,
+) Error!Decoder {
+    return initPackets(
+        allocator,
+        try PacketSource.init(allocator, source, options),
+        options,
+    );
 }
 
-/// Open parsed audio using the same unchanged, seekable source.
-pub fn initParsed(allocator: std.mem.Allocator, source: Source, parsed: types.ParsedAudio) Error!Decoder {
-    return initPackets(allocator, try PacketSource.initParsed(allocator, source, parsed, .{}), .{});
+/// Open parsed WAV/Wave64 audio using the same unchanged, seekable source.
+pub fn initParsed(
+    allocator: std.mem.Allocator,
+    source: Source,
+    parsed: types.ParsedAudio,
+) Error!Decoder {
+    return initPackets(
+        allocator,
+        try PacketSource.initParsed(allocator, source, parsed, .{}),
+        .{},
+    );
 }
 
 /// Take ownership of a packet source, including on initialization failure.
-pub fn initPackets(allocator: std.mem.Allocator, source: PacketSource, options: Options) Error!Decoder {
+/// Initialize its built-in codec and reserve last-frame history for at least
+/// options.reserve_channels channels.
+pub fn initPackets(
+    allocator: std.mem.Allocator,
+    source: PacketSource,
+    options: Options,
+) Error!Decoder {
     var packets = source;
-    const codec = Codec.init(allocator, packets.encoding, packets.format, options) catch |err| {
+    var codec = Codec.init(
+        allocator,
+        packets.encoding,
+        packets.format,
+        options,
+    ) catch |err| {
         packets.deinit();
         return err;
     };
-    return initCodec(allocator, packets, codec);
-}
-
-/// Take ownership of a packet source and codec, including on failure.
-/// Unknown output format is established by decoding initial packets.
-pub fn initCodec(allocator: std.mem.Allocator, source: PacketSource, backend: Codec) Error!Decoder {
-    var packets = source;
-    var codec = backend;
     packets.configure(codec.scheme) catch |err| {
         codec.deinit();
         packets.deinit();
@@ -77,6 +104,11 @@ pub fn initCodec(allocator: std.mem.Allocator, source: PacketSource, backend: Co
         .last_frame = &.{},
     };
     errdefer result.deinit();
+    result.last_frame = try allocator.alloc(
+        f32,
+        @max(result.format.channels, options.reserve_channels),
+    );
+    @memset(result.last_frame, 0);
     if (result.format.channels == 0 or result.format.sample_rate == 0) {
         while (result.format.channels == 0 or result.format.sample_rate == 0) {
             switch (try result.advance()) {
@@ -85,9 +117,6 @@ pub fn initCodec(allocator: std.mem.Allocator, source: PacketSource, backend: Co
                 .ready => {},
             }
         }
-    } else {
-        result.last_frame = try allocator.alloc(f32, result.format.channels);
-        @memset(result.last_frame, 0);
     }
     if (result.presentation.end) |end| {
         if (end < result.presentation.start) return error.InvalidData;
@@ -95,7 +124,11 @@ pub fn initCodec(allocator: std.mem.Allocator, source: PacketSource, backend: Co
     } else if (packets.info().total_frames) |count| {
         const end = @as(i128, packets.decoded_origin) + count;
         if (end < result.presentation.start) return error.InvalidData;
-        result.metadata.total_frames = std.math.cast(u64, end - result.presentation.start) orelse return error.InvalidData;
+        result.metadata.total_frames = std.math.cast(
+            u64,
+            end - result.presentation.start,
+        )
+            orelse return error.InvalidData;
     }
     return result;
 }
@@ -114,8 +147,10 @@ pub fn info(self: *const Decoder) types.Info {
 }
 
 /// Return frames written, leaving the unused tail untouched; zero means EOF.
-/// out must be nonempty and channel-aligned. After FormatChanged, consult info and retry.
-/// After an input error, discard output and seek successfully or reopen before reading.
+/// out must be nonempty and channel-aligned. After FormatChanged, consult info
+/// and retry.
+/// After an input error, discard output and seek successfully or reopen before
+/// reading.
 pub fn read(self: *Decoder, out: []f32) Error!usize {
     if (self.failure) |err| return err;
     if (self.format_notice) {
@@ -126,7 +161,9 @@ pub fn read(self: *Decoder, out: []f32) Error!usize {
         };
         return error.FormatChanged;
     }
-    if (out.len == 0 or out.len % self.format.channels != 0) return error.InvalidBufferSize;
+    if (out.len == 0 or out.len % self.format.channels != 0) {
+        return error.InvalidBufferSize;
+    }
     const count = self.readFrames(out) catch |err| {
         if (err != error.FormatChanged) self.failure = err;
         return err;
@@ -148,8 +185,15 @@ fn readFrames(self: *Decoder, out: []f32) Error!usize {
             self.pending = self.pending[count..];
             written += count;
         } else if (self.silence != 0) {
-            const frames: usize = @intCast(@min((out.len - written) / channels, self.silence));
-            for (0..frames) |i| @memcpy(out[written + i * channels ..][0..channels], self.last_frame);
+            const frames: usize = @intCast(
+                @min((out.len - written) / channels, self.silence),
+            );
+            for (0..frames) |frame_index| {
+                @memcpy(
+                    out[written + frame_index * channels..][0..channels],
+                    self.last_frame[0..channels],
+                );
+            }
             written += frames * channels;
             self.silence -= frames;
         } else {
@@ -179,7 +223,8 @@ fn advance(self: *Decoder) Error!Advance {
         try self.acceptBlock(block);
         return .ready;
     }
-    // A codec must request input, emit output, or finish without unbounded empty events.
+    // A codec must request input, emit output, or finish without unbounded
+    // empty events.
     var empty_events: usize = 0;
     while (true) {
         const result = try self.codec.receive();
@@ -216,7 +261,12 @@ fn advance(self: *Decoder) Error!Advance {
                 if (self.presentation.end) |end| {
                     if (total < end) return error.TruncatedData;
                 }
-                const end: u64 = @intCast(@min(total, self.presentation.end orelse std.math.maxInt(u64)));
+                const end: u64 = @intCast(
+                    @min(
+                        total,
+                        self.presentation.end orelse std.math.maxInt(u64),
+                    ),
+                );
                 self.metadata.total_frames = end - self.presentation.start;
                 return .finished;
             },
@@ -225,26 +275,48 @@ fn advance(self: *Decoder) Error!Advance {
                 const event = try self.packets.next();
                 switch (event) {
                     .packet => |packet| {
-                        // receive just requested input; refusing it would deadlock the loop.
-                        if (try self.codec.submit(packet) != .accepted) return error.InvalidState;
+                        // receive just requested input; refusing it would
+                        // deadlock the loop.
+                        if (try self.codec.submit(packet) != .accepted) {
+                            return error.InvalidState;
+                        }
                         empty_events = 0;
                     },
                     .presentation => |bounds| {
-                        if (bounds.start != self.presentation.start) return error.InvalidData;
+                        if (bounds.start != self.presentation.start) {
+                            return error.InvalidData;
+                        }
                         if (self.presentation.end) |end| {
-                            if (bounds.end == null or bounds.end.? != end) return error.InvalidData;
+                            if (bounds.end == null or bounds.end.? != end) {
+                                return error.InvalidData;
+                            }
                         }
                         if (bounds.end) |end| {
-                            if (end < bounds.start or end < self.decoded_frame) return error.InvalidData;
+                            if (
+                                end < bounds.start
+                                    or end < self.decoded_frame
+                            ) {
+                                return error.InvalidData;
+                            }
                             self.metadata.total_frames = end - bounds.start;
                         }
                         self.presentation = bounds;
                     },
                     .silence => |frames| {
                         const start = self.decoded_frame;
-                        self.decoded_frame = std.math.add(i128, start, frames) catch return error.InvalidData;
-                        const first = @max(start, @max(self.presentation.start, self.discard_until orelse 0));
-                        const last = @min(self.decoded_frame, self.presentation.end orelse std.math.maxInt(u64));
+                        self.decoded_frame = std.math.add(i128, start, frames)
+                            catch return error.InvalidData;
+                        const first = @max(
+                            start,
+                            @max(
+                                self.presentation.start,
+                                self.discard_until orelse 0,
+                            ),
+                        );
+                        const last = @min(
+                            self.decoded_frame,
+                            self.presentation.end orelse std.math.maxInt(u64),
+                        );
                         self.silence = @intCast(@max(0, last - first));
                         if (self.silence != 0) return .ready;
                     },
@@ -260,10 +332,17 @@ fn advance(self: *Decoder) Error!Advance {
 
 fn applyFormat(self: *Decoder) Error!void {
     const format = self.pending_format orelse return error.InvalidState;
-    if (format.channels == 0 or format.sample_rate == 0) return error.InvalidData;
-    self.last_frame = try self.allocator.realloc(self.last_frame, format.channels);
+    if (format.channels == 0 or format.sample_rate == 0) {
+        return error.InvalidData;
+    }
+    if (format.channels > self.last_frame.len) return error.LimitExceeded;
     @memset(self.last_frame, 0);
-    if (self.format.sample_rate != 0 and self.format.sample_rate != format.sample_rate) self.metadata.variable_sample_rate = true;
+    if (
+        self.format.sample_rate != 0
+            and self.format.sample_rate != format.sample_rate
+    ) {
+        self.metadata.variable_sample_rate = true;
+    }
     self.format = format;
     self.pending_format = null;
     self.metadata.channels = format.channels;
@@ -271,26 +350,46 @@ fn applyFormat(self: *Decoder) Error!void {
     self.metadata.total_frames = null;
 }
 
-fn acceptBlock(self: *Decoder, block: decoding.AudioBlock) Error!void {
+fn acceptBlock(self: *Decoder, block: types.AudioBlock) Error!void {
     const channels = block.format.channels;
-    if (channels == 0 or block.samples.len % channels != 0) return error.InvalidState;
+    if (channels == 0 or block.samples.len % channels != 0) {
+        return error.InvalidState;
+    }
     const start = self.decoded_frame;
     if (block.timestamp) |timestamp| {
-        if (timestamp.time_base.denominator == 0 or timestamp.time_base.numerator == 0) return error.InvalidData;
+        if (
+            timestamp.time_base.denominator == 0
+                or timestamp.time_base.numerator == 0
+        ) {
+            return error.InvalidData;
+        }
     }
     const frames = block.frameCount();
-    self.decoded_frame = std.math.add(i128, start, frames) catch return error.InvalidData;
-    if (frames != 0) @memcpy(self.last_frame, block.samples[block.samples.len - channels ..]);
-    const first = @max(start, @max(self.presentation.start, self.discard_until orelse 0));
-    const last = @min(self.decoded_frame, self.presentation.end orelse std.math.maxInt(u64));
+    self.decoded_frame = std.math.add(i128, start, frames)
+        catch return error.InvalidData;
+    if (frames != 0) {
+        @memcpy(
+            self.last_frame[0..channels],
+            block.samples[block.samples.len - channels..],
+        );
+    }
+    const first = @max(
+        start,
+        @max(self.presentation.start, self.discard_until orelse 0),
+    );
+    const last = @min(
+        self.decoded_frame,
+        self.presentation.end orelse std.math.maxInt(u64),
+    );
     if (last > first) {
         const offset: usize = @intCast(first - start);
         const count: usize = @intCast(last - first);
-        self.pending = block.samples[offset * channels ..][0 .. count * channels];
+        self.pending = block.samples[offset * channels..][0..count * channels];
     }
 }
 
-/// Seek to an absolute presented frame; successful seeking clears prior input errors.
+/// Seek to an absolute presented frame; successful seeking clears prior input
+/// errors.
 /// Sequential input returns Unseekable without changing decoder state.
 pub fn seekFrame(self: *Decoder, frame: u64) Error!void {
     if (!self.packets.seekable) return error.Unseekable;
@@ -306,7 +405,8 @@ pub fn seekFrame(self: *Decoder, frame: u64) Error!void {
 }
 
 fn seekInternal(self: *Decoder, frame: u64) Error!void {
-    const target = std.math.add(u64, self.presentation.start, frame) catch return error.OutOfRange;
+    const target = std.math.add(u64, self.presentation.start, frame)
+        catch return error.OutOfRange;
     const anchor = try self.packets.seek(target -| self.codec.preroll_frames);
     if (@as(i128, anchor.frame) > target) return error.InvalidState;
     self.codec.reset();
@@ -324,7 +424,9 @@ fn seekInternal(self: *Decoder, frame: u64) Error!void {
     while (self.decoded_frame < target) {
         switch (try self.advance()) {
             .ready => {},
-            .finished => if (self.decoded_frame < target) return error.OutOfRange,
+            .finished => {
+                if (self.decoded_frame < target) return error.OutOfRange;
+            },
             .format_changed => try self.applyFormat(),
         }
     }

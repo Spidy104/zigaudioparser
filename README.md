@@ -1,12 +1,18 @@
 # zaudio
 
-A small, dependency-free audio reading library for **Zig 0.16.0**.
+A small audio reading library for **Zig 0.16.0**, developing native Zig container readers and
+codecs.
 
 ## Quick start
 
 ```sh
 zig build
 zig build run -- path/to/audio.wav
+```
+
+```sh
+zig build -Dopus=false  # dependency-free PCM build
+zig build run -- path/to/audio.ogg
 ```
 
 ## Roadmap
@@ -74,7 +80,7 @@ The goal is to support the audio containers, streams, and codecs supported by FF
 - [ ] Musepack SV8.
 - [ ] Nellymoser Asao.
 - [ ] On2 Audio for Video Codec.
-- [ ] Opus.
+- [x] Opus (temporary libopus backend).
 - [ ] QDesign Music.
 - [ ] QDesign Music Codec 2.
 - [ ] SBC.
@@ -270,6 +276,7 @@ The goal is to support the audio containers, streams, and codecs supported by FF
 ### Common audio containers and streams
 
 - [ ] MP3 streams.
+- [x] Ogg Opus streams (single logical stream).
 - [ ] MP1 streams.
 - [ ] MP2 streams.
 - [ ] ADTS.

@@ -1,0 +1,5 @@
+.{
+    .width = 80,
+    .indent = 4,
+    .ignore = .{ ".git/", ".zig-cache/", "zig-out/", "zig-pkg/" },
+}

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ! -x .zig-cache/mint/bin/mint ]]; then
+    revision=23d354bedcd7d748c4b83e1c000238283c207ca9
+    source_dir=$(mktemp -d)
+    trap 'rm -rf "$source_dir"' EXIT
+    curl -fL "https://codeload.github.com/ziord/mint/tar.gz/$revision" |
+        tar -xz -C "$source_dir" --strip-components=1
+    zig build --build-file "$source_dir/build.zig" \
+        -Doptimize=ReleaseSafe --prefix "$PWD/.zig-cache/mint"
+fi
+.zig-cache/mint/bin/mint fmt .
+if ! git diff --quiet -- '*.zig' '*.zon'; then
+    echo "Review and stage the formatted Zig files, then retry the commit."
+    exit 1
+fi

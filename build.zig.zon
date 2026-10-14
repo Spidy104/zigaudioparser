@@ -1,8 +1,22 @@
 .{
     .name = .zaudio,
     .version = "0.0.0",
-    .fingerprint = 0xc5244e8c7fdd366b, // Changing this has security and trust implications.
+    // Changing this has security and trust implications.
+    .fingerprint = 0xc5244e8c7fdd366b,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
-    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md" },
+    .dependencies = .{
+        .opus = .{
+            .url = "https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz",
+            .hash = "N-V-__8AAADWXwF69u4_iufnV_gwfb3M2ATbbZF-yGFRrEFH",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "build",
+        "README.md",
+        "THIRD_PARTY.md",
+    },
 }
