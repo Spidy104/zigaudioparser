@@ -1,6 +1,6 @@
 # Temporary codec dependencies
 
-zaudio builds these pinned upstream sources using Zig. These will be replaced eventually
+zigaudioparser builds these pinned upstream sources using Zig. These will be replaced eventually
 
 - Opus 1.5.2: https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz (BSD-style license below).
   Portable source lists in `build/opus.zig` come from this release.

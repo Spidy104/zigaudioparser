@@ -1,21 +1,21 @@
 //! Example client: print decoded PCM samples, one frame per line.
 const std = @import("std");
-const zaudio = @import("zaudio");
+const zigaudioparser = @import("zigaudioparser");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     if (args.len != 2) {
-        std.debug.print("Usage: zaudio-info <audio-file>\n", .{});
+        std.debug.print("Usage: zigaudioparser-info <audio-file>\n", .{});
         std.process.exit(1);
     }
     const file = try std.Io.Dir.cwd().openFile(init.io, args[1], .{});
     defer file.close(init.io);
     var input_buffer: [64 * 1024]u8 = undefined;
     var reader = file.reader(init.io, &input_buffer);
-    var decoder = try zaudio.Decoder.init(
+    var decoder = try zigaudioparser.Decoder.init(
         allocator,
-        zaudio.Source.fromFile(&reader),
+        zigaudioparser.Source.fromFile(&reader),
     );
     defer decoder.deinit();
     const info = decoder.info();

@@ -1,4 +1,4 @@
-# zaudio
+# zigaudioparser
 
 A small audio reading library for **Zig 0.16.0**, developing native Zig container readers and
 codecs.

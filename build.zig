@@ -4,7 +4,7 @@ pub fn build(builder: *std.Build) !void {
     const target = builder.standardTargetOptions(.{});
     const optimize = builder.standardOptimizeOption(.{});
     const module = builder.addModule(
-        "zaudio",
+        "zigaudioparser",
         .{
             .root_source_file = builder.path("src/root.zig"),
             .target = target,
@@ -23,13 +23,15 @@ pub fn build(builder: *std.Build) !void {
     }
     const example = builder.addExecutable(
         .{
-            .name = "zaudio-info",
+            .name = "zigaudioparser-info",
             .root_module = builder.createModule(
                 .{
                     .root_source_file = builder.path("src/main.zig"),
                     .target = target,
                     .optimize = optimize,
-                    .imports = &.{.{ .name = "zaudio", .module = module }},
+                    .imports = &.{
+                        .{ .name = "zigaudioparser", .module = module },
+                    },
                 },
             ),
         },
