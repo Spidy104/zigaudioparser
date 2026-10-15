@@ -1,40 +1,36 @@
 //! libopus multistream decoder
 const std = @import("std");
-const Codec = @import("../Codec.zig");
 const types = @import("../types.zig");
-const Config = @import("../types.zig").OpusConfig;
+const Codec = @import("../Codec.zig");
 const libopus = @cImport({
         @cInclude("opus_multistream.h");
     });
 const Self = @This();
+
+pub const Error = types.Error;
+pub const Config = types.OpusConfig;
+
+// use extra seek history to settle energy prediction beyond the 80 ms
+// minimum recommended by rfc 7845.
+pub const preroll_frames: u64 = 24000; // 500 ms at 48 khz.
+
 allocator: std.mem.Allocator,
-/// Opaque C state allocated through the caller's allocator during
-/// initialization.
-/// Its address remains stable until deinit.
-/// Use 16-byte alignment for the C decoder state, including its internal
-/// arrays.
+/// owned decoder state; keep its address stable and aligned to 16 bytes.
 storage: []align(16) u8,
 config: Config,
 format: types.AudioFormat,
 
-// RFC 7845 recommends at least 80 ms. Longer history also converges CELT's
-// inter-frame energy prediction on files that retain differences after that
-// minimum, without replaying the stream from its beginning.
-pub const preroll_frames = 24000; // 500 ms at 48 kHz.
-
-/// Create an owning adapter for 48 kHz output in source channel order.
-/// Copy configuration and allocate libopus state
-/// UnitAdapter also allocates state and 5760 * channels f32 output samples
-/// here.
-/// Decoding uses libopus's internal stack scratch (VAR_ARRAYS)
+/// allocate a 48 khz decoder and output buffer in source channel order.
+/// libopus uses stack scratch while decoding.
 pub fn init(
     allocator: std.mem.Allocator,
     config: Config,
     format: types.AudioFormat,
     options: types.Options,
-) types.Error!*Codec.UnitAdapter(Self) {
+) Error!Codec {
     if (
         format.sample_rate != 48000
+            or format.channels == 0
             or format.channels > 8
             or config.streams == 0
             or config.coupled_streams > config.streams
@@ -58,6 +54,7 @@ pub fn init(
         .config = config,
         .format = format,
     };
+    // map coded channels into the file's output order.
     if (
         libopus.opus_multistream_decoder_init(
             unit.state(),
@@ -70,15 +67,41 @@ pub fn init(
     ) {
         return error.InvalidData;
     }
-    // 5760 = maximum 120 ms packet duration at 48 kHz, per channel.
-    return Codec.UnitAdapter(Self)
+    // 5760 samples per channel cover the maximum 120 ms packet.
+    const adapter = try Codec.UnitAdapter(Self)
         .init(allocator, unit, .packets, 5760, format, options);
+    return adapter.interface(.opus);
 }
-/// Borrow the opaque decoder within the aligned allocation.
-fn state(self: *Self) *libopus.OpusMSDecoder {
-    return @ptrCast(self.storage.ptr);
+
+/// decode one packet with header gain; return the frame count.
+/// output must hold 5760 samples per channel; the pipeline handles trimming.
+pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
+    const packet_length = std.math.cast(c_int, bytes.len)
+        orelse return error.LimitExceeded;
+    // zero disables forward error correction for this packet.
+    const decoded_samples = libopus.opus_multistream_decode_float(
+        self.state(),
+        bytes.ptr,
+        packet_length,
+        output.ptr,
+        5760,
+        0,
+    );
+    if (decoded_samples < 0) return error.InvalidData;
+    const sample_count: usize = @intCast(decoded_samples);
+    // convert q7.8 db to amplitude: 10^(gain / (256 * 20)).
+    const gain = std.math.pow(
+        f32,
+        10,
+        @as(f32, @floatFromInt(self.config.gain_q8)) / (20 * 256),
+    );
+    for (output[0..sample_count * self.format.channels]) |*sample| {
+        sample.* *= gain;
+    }
+    return sample_count;
 }
-/// Reinitialize decoding history with the same channels and mapping.
+
+/// reset history with the same channels and mapping.
 pub fn reset(self: *Self) void {
     const result = libopus.opus_multistream_decoder_init(
         self.state(),
@@ -90,45 +113,13 @@ pub fn reset(self: *Self) void {
     );
     std.debug.assert(result == libopus.OPUS_OK);
 }
-/// Release C decoder state; UnitAdapter releases its separate PCM output
-/// storage.
+
+/// free decoder state; the adapter frees its sample buffer.
 pub fn deinit(self: *Self) void {
     self.allocator.free(self.storage);
 }
-/// Decode one multistream packet and apply header gain; return samples per
-/// channel.
-/// out must hold 5760 * format.channels samples. No resampling, clipping,
-/// optional
-/// tag gain, or packet-loss concealment is applied; Decoder handles sample
-/// trimming.
-pub fn decodeUnit(
-    self: *Self,
-    bytes: []const u8,
-    out: []f32,
-) types.Error!usize {
-    const packet_length = std.math.cast(c_int, bytes.len)
-        orelse return error.LimitExceeded;
-    // The final zero disables forward error correction: decode this packet
-    // itself.
-    const decoded_samples = libopus.opus_multistream_decode_float(
-        self.state(),
-        bytes.ptr,
-        packet_length,
-        out.ptr,
-        5760,
-        0,
-    );
-    if (decoded_samples < 0) return error.InvalidData;
-    const sample_count: usize = @intCast(decoded_samples);
-    // Eight fractional bits mean 256 stored units per dB.
-    // Convert signed Q7.8 dB to a linear amplitude multiplier: 10^(dB/20).
-    const gain = std.math.pow(
-        f32,
-        10,
-        @as(f32, @floatFromInt(self.config.gain_q8)) / (20 * 256),
-    );
-    for (out[0..sample_count * self.format.channels]) |*sample| {
-        sample.* *= gain;
-    }
-    return sample_count;
+
+/// borrow decoder state from aligned storage.
+fn state(self: *Self) *libopus.OpusMSDecoder {
+    return @ptrCast(self.storage.ptr);
 }

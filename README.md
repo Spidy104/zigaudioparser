@@ -11,7 +11,7 @@ zig build run -- path/to/audio.wav
 ```
 
 ```sh
-zig build -Dopus=false  # dependency-free PCM build
+zig build -Dopus=false -Dvorbis=false  # dependency-free pcm build
 zig build run -- path/to/audio.ogg
 ```
 
@@ -84,7 +84,7 @@ The goal is to support the audio containers, streams, and codecs supported by FF
 - [ ] QDesign Music.
 - [ ] QDesign Music Codec 2.
 - [ ] SBC.
-- [ ] Vorbis.
+- [x] vorbis (temporary libvorbis backend).
 - [ ] Voxware MetaSound.
 - [ ] VQF TwinVQ.
 - [ ] Windows Media Audio 1.

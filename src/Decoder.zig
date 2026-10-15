@@ -1,8 +1,6 @@
-//! User-facing read/seek pipeline: container packets, codec output, and
-//! trimming.
-//! Returns interleaved f32 samples in source channel order.
-//! Integer PCM is normalized to [-1, 1]; floating-point samples retain their
-//! scale.
+//! coordinate packets, decoding, trimming, and seeking.
+//! return interleaved f32 samples in source channel order.
+//! integer pcm is normalized to [-1, 1]; floats retain their scale.
 const std = @import("std");
 const types = @import("types.zig");
 const Source = @import("Source.zig");
@@ -19,11 +17,9 @@ codec: Codec,
 metadata: types.Info,
 format: types.AudioFormat,
 presentation: types.Presentation,
-/// Fixed history storage allocated at initialization. Only format.channels
-/// samples are active; retained for WAVE slnt events (repeat the previous
-/// frame).
+/// last frame retained for wave silence; allocated during initialization.
 last_frame: []f32,
-/// Borrows unread codec output; read copies it to the caller's output slice.
+/// unread codec output, copied into the caller's buffer.
 pending: []const f32 = &.{},
 deferred_block: ?types.AudioBlock = null,
 silence: u64 = 0,
@@ -36,15 +32,13 @@ format_notice: bool = false,
 pending_format: ?types.AudioFormat = null,
 failure: ?Error = null,
 
-/// Open audio, borrowing exclusive source access until deinit.
-/// Keep the source reader and buffer in place and input open and unchanged.
-/// Allocates pipeline state and buffers during initialization.
-/// deinit releases all owned storage.
+/// open audio and allocate state; borrow exclusive input access until cleanup.
+/// keep reader and buffer in place, and input open and unchanged.
 pub fn init(allocator: std.mem.Allocator, source: Source) Error!Decoder {
     return initOptions(allocator, source, .{});
 }
 
-/// Open audio with explicit buffer capacities and input/index limits.
+/// open audio with buffer and index limits.
 pub fn initOptions(
     allocator: std.mem.Allocator,
     source: Source,
@@ -57,7 +51,7 @@ pub fn initOptions(
     );
 }
 
-/// Open parsed WAV/Wave64 audio using the same unchanged, seekable source.
+/// open parsed wav/wave64 ranges from the same unchanged, seekable source.
 pub fn initParsed(
     allocator: std.mem.Allocator,
     source: Source,
@@ -70,9 +64,8 @@ pub fn initParsed(
     );
 }
 
-/// Take ownership of a packet source, including on initialization failure.
-/// Initialize its built-in codec and reserve last-frame history for at least
-/// options.reserve_channels channels.
+/// take ownership of the packet source, even on failure.
+/// initialize the codec and reserve last-frame history for the channel limit.
 pub fn initPackets(
     allocator: std.mem.Allocator,
     source: PacketSource,
@@ -133,7 +126,7 @@ pub fn initPackets(
     return result;
 }
 
-/// Release owned buffers and codec state; borrowed input remains open.
+/// free buffers and codec state; leave input open.
 pub fn deinit(self: *Decoder) void {
     self.codec.deinit();
     self.packets.deinit();
@@ -141,16 +134,15 @@ pub fn deinit(self: *Decoder) void {
     self.* = undefined;
 }
 
-/// Return the current output format and known presented frame count.
+/// return output format and known frame count after trimming.
 pub fn info(self: *const Decoder) types.Info {
     return self.metadata;
 }
 
-/// Return frames written, leaving the unused tail untouched; zero means EOF.
-/// out must be nonempty and channel-aligned. After FormatChanged, consult info
-/// and retry.
-/// After an input error, discard output and seek successfully or reopen before
-/// reading.
+/// return frames written; leave unused output untouched. zero means end.
+/// output must be nonempty and channel-aligned. after a format change,
+/// check metadata and retry. after an input error, discard output and
+/// seek successfully or reopen before reading.
 pub fn read(self: *Decoder, out: []f32) Error!usize {
     if (self.failure) |err| return err;
     if (self.format_notice) {
@@ -223,8 +215,7 @@ fn advance(self: *Decoder) Error!Advance {
         try self.acceptBlock(block);
         return .ready;
     }
-    // A codec must request input, emit output, or finish without unbounded
-    // empty events.
+    // reject codecs that repeatedly emit empty output without progress.
     var empty_events: usize = 0;
     while (true) {
         const result = try self.codec.receive();
@@ -275,8 +266,7 @@ fn advance(self: *Decoder) Error!Advance {
                 const event = try self.packets.next();
                 switch (event) {
                     .packet => |packet| {
-                        // receive just requested input; refusing it would
-                        // deadlock the loop.
+                        // refusing requested input would deadlock the loop.
                         if (try self.codec.submit(packet) != .accepted) {
                             return error.InvalidState;
                         }
@@ -388,9 +378,8 @@ fn acceptBlock(self: *Decoder, block: types.AudioBlock) Error!void {
     }
 }
 
-/// Seek to an absolute presented frame; successful seeking clears prior input
-/// errors.
-/// Sequential input returns Unseekable without changing decoder state.
+/// seek to a presented frame; success clears prior input errors.
+/// unsupported seeking leaves decoder state unchanged.
 pub fn seekFrame(self: *Decoder, frame: u64) Error!void {
     if (!self.packets.seekable) return error.Unseekable;
     if (self.metadata.total_frames) |total| {
@@ -432,7 +421,7 @@ fn seekInternal(self: *Decoder, frame: u64) Error!void {
     }
 }
 
-/// Return presented frame position after the last successful read or seek.
+/// return the frame position after the last successful read or seek.
 pub fn tellFrame(self: *const Decoder) u64 {
     return self.frame_offset;
 }

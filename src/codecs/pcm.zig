@@ -1,15 +1,54 @@
-//! Container-independent PCM conversion into interleaved f32 samples.
+//! convert pcm into interleaved f32 samples.
 const std = @import("std");
 const types = @import("../types.zig");
+const Codec = @import("../Codec.zig");
+const Self = @This();
 
-format: types.PcmFormat,
+pub const Error = types.Error;
+pub const Config = types.PcmFormat;
+pub const preroll_frames: u64 = 0;
+
+format: Config,
 channels: u16,
 
-/// Describe complete PCM frames after validating the sample format.
-pub fn scheme(
-    format: types.PcmFormat,
-    channels: u16,
-) types.Error!types.InputScheme {
+/// validate the format and allocate the adapter and sample buffer.
+pub fn init(
+    allocator: std.mem.Allocator,
+    config: Config,
+    format: types.AudioFormat,
+    options: types.Options,
+) Error!Codec {
+    if (format.sample_rate == 0) return error.InvalidData;
+    const input_scheme = try scheme(config, format.channels);
+    const unit = Self{ .format = config, .channels = format.channels };
+    const adapter = try Codec.UnitAdapter(Self)
+        .init(allocator, unit, input_scheme, 1, format, options);
+    return adapter.interface(.pcm);
+}
+
+/// convert complete frames; output must fit all samples.
+pub fn decodeUnit(self: *Self, bytes: []const u8, output: []f32) Error!usize {
+    const size = self.format.sample_type.byteSize();
+    if (bytes.len % (size * self.channels) != 0) return error.InvalidData;
+    const samples = bytes.len / size;
+    if (output.len < samples) return error.InvalidBufferSize;
+    for (output[0..samples], 0..) |*sample, sample_index| {
+        sample.* = decodeSample(
+            bytes[sample_index * size..][0..size],
+            self.format,
+        );
+    }
+    return samples / self.channels;
+}
+
+/// pcm has no decoding history.
+pub fn reset(_: *Self) void {}
+
+/// pcm has no separate decoder allocation.
+pub fn deinit(_: *Self) void {}
+
+/// validate the format and return its frame size.
+pub fn scheme(format: Config, channels: u16) Error!types.InputScheme {
     if (channels == 0) return error.InvalidData;
     try validateFormat(format);
     return .{
@@ -18,30 +57,7 @@ pub fn scheme(
     };
 }
 
-/// Convert a complete batch; out must have room for every sample.
-pub fn decodeUnit(
-    self: *@This(),
-    input: []const u8,
-    out: []f32,
-) types.Error!usize {
-    const size = self.format.sample_type.byteSize();
-    if (input.len % (size * self.channels) != 0) return error.InvalidData;
-    const samples = input.len / size;
-    if (out.len < samples) return error.InvalidBufferSize;
-    for (out[0..samples], 0..) |*sample, sample_index| {
-        sample.* = decodeSample(
-            input[sample_index * size..][0..size],
-            self.format,
-        );
-    }
-    return samples / self.channels;
-}
-
-/// PCM samples carry no decoding history.
-pub fn reset(_: *@This()) void {}
-
-/// Return InvalidData if valid_bits is zero or exceeds the sample storage
-/// width.
+/// reject zero valid_bits or precision beyond the storage width.
 pub fn validateFormat(format: types.PcmFormat) types.ValidationError!void {
     if (format.valid_bits) |valid_bits| {
         if (valid_bits == 0 or valid_bits > format.sample_type.byteSize() * 8) {
@@ -50,7 +66,7 @@ pub fn validateFormat(format: types.PcmFormat) types.ValidationError!void {
     }
 }
 
-/// Convert one encoded sample to f32; bytes must contain a full sample.
+/// convert one complete encoded sample to f32.
 fn decodeSample(bytes: []const u8, format: types.PcmFormat) f32 {
     const endian = format.byte_order;
     return switch (format.sample_type) {

@@ -1,7 +1,7 @@
-//! Audio metadata, sample formats, packet types, options, and errors.
+//! audio metadata, sample formats, packets, options, and errors.
 const std = @import("std");
 
-/// Audio container type.
+/// identify the audio container.
 pub const Format = enum { wav, wave64, ogg };
 
 pub const PcmSampleType = enum {
@@ -14,7 +14,7 @@ pub const PcmSampleType = enum {
     float32,
     float64,
 
-    /// Return storage bytes per sample.
+    /// return storage bytes per sample.
     pub fn byteSize(self: PcmSampleType) usize {
         return switch (self) {
             .unsigned8, .signed8 => 1,
@@ -26,38 +26,43 @@ pub const PcmSampleType = enum {
     }
 };
 
-/// Interleaved PCM storage. Reduced precision integers use the highest bits.
-/// Null valid_bits means all storage bits are used.
+/// store interleaved pcm; reduced-precision integers use the highest bits.
+/// null valid_bits uses all storage bits.
 pub const PcmFormat = struct {
     sample_type: PcmSampleType,
     byte_order: std.builtin.Endian,
     valid_bits: ?u16 = null,
 };
 
-/// Audio encoding, decoder support may vary.
+/// identify the encoding; decoder support varies.
 pub const DecodingScheme = union(enum) {
     pcm: PcmFormat,
     opus: OpusConfig,
+    vorbis: VorbisConfig,
     alaw,
     mulaw,
     unsupported,
 };
 
-/// Ogg Opus mapping families 0 and 1, in Opus/Vorbis channel order.
+/// borrow identification, comment, and setup packets in stream order.
+/// keep them unchanged until codec initialization copies their state.
+pub const VorbisConfig = struct { headers: [3][]const u8 };
+
+/// configure opus mapping families 0 and 1 in opus/vorbis channel order.
 pub const OpusConfig = struct {
     streams: u8 = 1,
     coupled_streams: u8 = 0,
     mapping: [8]u8 = .{ 0, 1, 2, 3, 4, 5, 6, 7 },
-    /// Signed Q7.8 dB gain from OpusHead.
+    /// signed q7.8 db gain from the identification header.
     gain_q8: i16 = 0,
 };
 
-/// Absolute byte range in source.
+/// locate an absolute byte range in the source.
 pub const DataRange = struct {
     offset: u64 = 0,
     length: u64 = 0,
 
-    /// Return byte offset just past the range, overflow returns InvalidData.
+    /// return the exclusive end offset; reject overflow.
     pub fn end(self: DataRange) ValidationError!u64 {
         return std.math.add(u64, self.offset, self.length)
             catch error.InvalidData;
@@ -67,26 +72,25 @@ pub const DataRange = struct {
 pub const AudioData = @import("AudioData.zig");
 pub const Segment = AudioData.Segment;
 
-/// Parsed metadata and borrowed audio segments.
+/// store parsed metadata and borrowed audio segments.
 pub const ParsedAudio = struct {
     info: Info,
     scheme: DecodingScheme,
     data: AudioData,
 };
 
-/// Audio metadata.
+/// describe the audio stream.
 pub const Info = struct {
     format: Format,
     sample_rate: u32,
     channels: u16,
-    /// One frame contains one sample for each channel. Null if unknown.
+    /// count frames, each with one sample per channel; null means unknown.
     total_frames: ?u64,
-    /// True when decoded output has changed sample rate.
+    /// record whether the output sample rate has changed.
     variable_sample_rate: bool = false,
 
-    /// Return duration in seconds, null if frame count is unknown or rate has
-    /// changed.
-    /// Sample rate must be nonzero.
+    /// return duration, or null for unknown counts or a changed rate.
+    /// sample rate must be nonzero.
     pub fn durationSeconds(self: Info) ?f64 {
         if (self.variable_sample_rate) return null;
         const frames = self.total_frames orelse return null;
@@ -95,10 +99,10 @@ pub const Info = struct {
     }
 };
 
-/// Invalid audio metadata, sample format, or byte range.
+/// report invalid metadata, sample formats, or byte ranges.
 pub const ValidationError = error{ InvalidData };
 
-/// Container detection and metadata errors
+/// report container detection and parsing errors.
 pub const ParseError = error{
     UnsupportedFormat,
     UnsupportedChunkLayout,
@@ -106,7 +110,7 @@ pub const ParseError = error{
     TruncatedData,
 };
 
-/// Sample decoding and decoder usage errors
+/// report decoding and decoder usage errors.
 pub const DecodeError = error{
     UnsupportedEncoding,
     InvalidData,
@@ -120,17 +124,17 @@ pub const DecodeError = error{
 
 pub const ReadError = std.Io.Reader.Error;
 pub const SeekError = std.Io.File.Reader.SeekError;
-/// Seeking a source whose seek callback may be unavailable.
+/// include errors from sources without seek support.
 pub const SourceSeekError = SeekError || error{ Unseekable };
 pub const SizeError = std.Io.File.Reader.SizeError || error{ Unseekable };
 
-/// Errors from accessing the source
+/// report source access errors.
 pub const IoError = ReadError || SeekError || SizeError;
 
-/// Complete container parser errors, including source access.
+/// include parsing and source access errors.
 pub const ParserError = ParseError || IoError;
 
-/// Complete decoder pipeline errors, including parsing, I/O, and allocation.
+/// include parsing, decoding, source access, and allocation errors.
 pub const DecoderError = ParseError
     || DecodeError
     || IoError
@@ -139,19 +143,17 @@ pub const DecoderError = ParseError
 pub const Error = DecoderError;
 
 pub const Options = struct {
-    /// Maximum bytes retained for one packet or configuration payload.
+    /// limit packet and configuration bytes, excluding c codec allocations.
     max_payload_bytes: usize = 64 * 1024 * 1024,
-    /// Maximum memory occupied by Ogg and segmented WAVE seek indexes.
+    /// limit seek-index storage, including spare capacity.
     max_index_bytes: usize = 64 * 1024 * 1024,
-    /// Working input capacity allocated during initialization, capped by
-    /// max_payload_bytes. Used by Ogg packet assembly, Framer, WAVE
-    /// input/format
-    /// storage, and fixed-unit codec input/output sizing.
-    /// Larger packets/configuration chunks return LimitExceeded.
+    /// allocate working input storage, capped by max_payload_bytes.
+    /// size packet assembly, metadata storage, and fixed-unit buffers from
+    /// this.
+    /// reject packets and configuration chunks that exceed capacity.
     buffer_bytes: usize = 64 * 1024,
-    /// Reserve last-frame history for at least this many channels in Decoder.
-    /// The initial channel count is also accommodated. Later format changes
-    /// exceeding the reserved capacity return LimitExceeded.
+    /// reserve history for this channel count or the initial count, if larger.
+    /// reject later format changes that exceed the reservation.
     reserve_channels: u16 = 8,
 
     pub fn bufferCapacity(self: Options) usize {
@@ -164,7 +166,7 @@ pub const InputScheme = union(enum) {
     blocks: u32,
     packets,
 
-    /// Return bytes per complete input unit, or null for packet framing.
+    /// return bytes per unit, or null for packet framing.
     pub fn unitBytes(self: InputScheme) ?u32 {
         return switch (self) {
             .samples, .blocks => |size| size,
@@ -174,19 +176,19 @@ pub const InputScheme = union(enum) {
 };
 
 pub const TimeBase = struct { numerator: u32, denominator: u32 };
-/// Media time; packet sources map timestamps to frame positions for seeking.
+/// map media timestamps to frame positions for seeking.
 pub const Timestamp = struct { value: i64, time_base: TimeBase };
 
-/// Decoded frame interval to present, in sample sequence order.
+/// select the decoded frame interval to present.
 pub const Presentation = struct { start: u64 = 0, end: ?u64 = null };
 
 pub const AudioFormat = struct {
     sample_rate: u32,
     channels: u16,
-    /// WAVE speaker bits in channel order; null means unspecified source order.
+    /// wave speaker bits; null preserves unspecified source channel order.
     channel_mask: ?u32 = null,
 
-    /// Return whether the output sample rate and channel layout agree.
+    /// compare sample rate and channel layout.
     pub fn eql(self: AudioFormat, other: AudioFormat) bool {
         return self.sample_rate == other.sample_rate
             and self.channels == other.channels
@@ -194,20 +196,20 @@ pub const AudioFormat = struct {
     }
 };
 
-/// Borrowed encoded bytes; submit must consume or copy them before returning.
+/// borrow encoded bytes; submission must consume or copy them before returning.
 pub const Packet = struct {
     bytes: []const u8,
     timestamp: ?Timestamp = null,
     duration: ?u64 = null,
 };
 
-/// Borrowed interleaved f32 samples, valid until the next codec operation.
+/// borrow interleaved f32 samples until the next codec operation.
 pub const AudioBlock = struct {
     samples: []const f32,
     format: AudioFormat,
     timestamp: ?Timestamp = null,
 
-    /// Return complete audio frames; codec output must be channel-aligned.
+    /// count frames; samples must be channel-aligned.
     pub fn frameCount(self: AudioBlock) usize {
         return self.samples.len / self.format.channels;
     }

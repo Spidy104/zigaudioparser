@@ -1,10 +1,7 @@
-//! Read audio through Decoder; container readers and codecs provide its stages.
 pub const types = @import("types.zig");
-/// Parse seekable WAV/Wave64 metadata; use Decoder.init for all supported
-/// formats.
-pub const parse = @import("containers/wave/Wave.zig").parse;
-pub const wave64 = @import("containers/wave/Wave.zig").wave64;
-pub const wav = @import("containers/wave/Wave.zig").wav;
+pub const parse = wave.parse;
+pub const wave64 = wave.wave64;
+pub const wav = wave.wav;
 pub const Decoder = @import("Decoder.zig");
 pub const DataRange = types.DataRange;
 pub const AudioData = types.AudioData;
@@ -30,3 +27,6 @@ pub const PacketSource = @import("PacketSource.zig");
 pub const Codec = @import("Codec.zig");
 pub const Framer = Codec.Framer;
 pub const OpusConfig = types.OpusConfig;
+pub const VorbisConfig = types.VorbisConfig;
+pub const wave = @import("containers/wave/root.zig");
+pub const ogg = @import("containers/ogg/root.zig");

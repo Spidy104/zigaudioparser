@@ -1,4 +1,4 @@
-//! Bounded seek indexes; callers define locations and the frame timeline.
+//! bound seek-index memory; callers define locations and frame positions.
 const std = @import("std");
 const Error = @import("../types.zig").Error;
 
@@ -9,8 +9,8 @@ pub fn Index(comptime Location: type) type {
 
         entries: std.ArrayList(Entry) = .empty,
 
-        /// Append in nondecreasing frame order during initialization only.
-        /// Both entry storage and spare capacity stay within the byte limit.
+        /// append nondecreasing frames during initialization.
+        /// keep entries and spare capacity within the byte limit.
         pub fn append(
             self: *Self,
             allocator: std.mem.Allocator,
@@ -29,7 +29,7 @@ pub fn Index(comptime Location: type) type {
                 return error.LimitExceeded;
             }
             if (self.entries.items.len == self.entries.capacity) {
-                // Start with up to 64 entries, then double within the budget.
+                // start with up to 64 entries; double within the budget.
                 const capacity = @min(
                     max_entries,
                     @max(@as(usize, 64), self.entries.capacity *| 2),
@@ -42,9 +42,9 @@ pub fn Index(comptime Location: type) type {
             self.entries.appendAssumeCapacity(entry);
         }
 
-        /// Find the last entry at/before target, or the first for earlier
+        /// find the last entry at or before target, or the first for earlier
         /// targets.
-        /// An empty index returns null.
+        /// return null for an empty index.
         pub fn atOrBefore(self: *const Self, target: u64) ?Entry {
             if (self.entries.items.len == 0) return null;
             var low: usize = 0;

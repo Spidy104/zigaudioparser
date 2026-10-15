@@ -1,4 +1,4 @@
-//! Borrowed audio layout. All layouts expose the same segment iterator.
+//! borrow audio ranges through a shared segment iterator.
 const std = @import("std");
 const types = @import("types.zig");
 const Source = @import("Source.zig");
@@ -7,12 +7,10 @@ const AudioData = @This();
 
 pub const Segment = union(enum) {
     data: types.DataRange,
-    /// Frames holding the preceding frame, or zero if there is no preceding
-    /// data.
+    /// repeat the preceding frame, or output zeros before any data.
     silence: u64,
 
-    /// Return frames using block_align bytes per frame; reject zero alignment
-    /// or partial frames.
+    /// count frames using nonzero block_align; reject partial frames.
     pub fn frameCount(
         self: Segment,
         block_align: u32,
@@ -30,13 +28,12 @@ pub const Segment = union(enum) {
 
 layout: union(enum) { single: Segment, wavl: riff.SegmentList },
 
-/// Create an audio layout containing one data or silence segment.
+/// wrap one data or silence segment.
 pub fn single(segment: Segment) AudioData {
     return .{ .layout = .{ .single = segment } };
 }
 
-/// Iterate segments in playback order. Iteration may reposition source; keep
-/// input unchanged.
+/// iterate in playback order; may seek input, which must stay unchanged.
 pub fn iterate(self: AudioData, source: Source) Iterator {
     return .{
         .state = switch (self.layout) {
@@ -46,8 +43,8 @@ pub fn iterate(self: AudioData, source: Source) Iterator {
     };
 }
 
-/// Validate segment bounds and sum frames for a fixed-width encoding.
-/// block_align is bytes per frame and must be nonzero. May reposition source.
+/// validate bounds and sum frames; block_align must be nonzero.
+/// may seek the source.
 pub fn frameCount(
     self: AudioData,
     source: Source,
@@ -70,7 +67,7 @@ pub fn frameCount(
 pub const Iterator = struct {
     state: union(enum) { single: ?Segment, wavl: riff.SegmentIterator },
 
-    /// Return the next segment, including empty ones; null means end of input.
+    /// return the next segment, including empty ones, or null at the end.
     pub fn next(self: *Iterator) types.ParserError!?Segment {
         switch (self.state) {
             .single => |*segment| {

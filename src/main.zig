@@ -1,4 +1,4 @@
-//! Example client: print decoded PCM samples, one frame per line.
+//! print decoded pcm samples, one frame per line.
 const std = @import("std");
 const zigaudioparser = @import("zigaudioparser");
 
