@@ -5,11 +5,16 @@ const zigaudioparser = @import("zigaudioparser");
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    if (args.len != 2) {
-        std.debug.print("Usage: zigaudioparser-info <audio-file>\n", .{});
+    const raw_pcm = args.len == 3 and std.mem.eql(u8, args[1], "--pcm-f32le");
+    if (args.len != 2 and !raw_pcm) {
+        std.debug.print(
+            "Usage: zigaudioparser-info [--pcm-f32le] <audio-file>\n",
+            .{},
+        );
         std.process.exit(1);
     }
-    const file = try std.Io.Dir.cwd().openFile(init.io, args[1], .{});
+    const file = try std.Io.Dir.cwd()
+        .openFile(init.io, args[if (raw_pcm) 2 else 1], .{});
     defer file.close(init.io);
     var input_buffer: [64 * 1024]u8 = undefined;
     var reader = file.reader(init.io, &input_buffer);
@@ -27,6 +32,15 @@ pub fn main(init: std.process.Init) !void {
     while (true) {
         const count = try decoder.read(samples);
         if (count == 0) break;
+        if (raw_pcm) {
+            for (samples[0..count * info.channels]) |sample| {
+                var bytes: [4]u8 = undefined;
+                std.mem.writeInt(u32, &bytes, @bitCast(sample), .little);
+                try stdout.interface.writeAll(&bytes);
+            }
+            frames += count;
+            continue;
+        }
         for (0..count) |frame| {
             for (
                 samples[frame * info.channels..][0..info.channels],
@@ -39,9 +53,10 @@ pub fn main(init: std.process.Init) !void {
         }
         frames += count;
     }
-    try stdout.interface.print(
-        "{s}: {d} Hz, {d} channels, {d} frames decoded\n",
-        .{ @tagName(info.format), info.sample_rate, info.channels, frames },
-    );
+    if (!raw_pcm)
+        try stdout.interface.print(
+            "{s}: {d} Hz, {d} channels, {d} frames decoded\n",
+            .{ @tagName(info.format), info.sample_rate, info.channels, frames },
+        );
     try stdout.interface.flush();
 }

@@ -1,5 +1,4 @@
 //! decode vorbis packets using libvorbis, which owns internal allocations.
-//! container framing and trimming remain in zig.
 const std = @import("std");
 const types = @import("../types.zig");
 const Codec = @import("../Codec.zig");
