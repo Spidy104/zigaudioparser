@@ -1,9 +1,9 @@
-//! Native FLAC container reader: ID3v2 tags in front, STREAMINFO, SEEKTABLE,
-//! skipped metadata blocks, and one frame per packet; the codec verifies each frame's
-//! checksums. Frame boundaries are found by scanning for the next valid
-//! frame header whose preceding CRC-16 matches, so a frame must fit
-//! options.bufferCapacity(). Seeking jumps to the nearest SEEKTABLE point,
-//! or restarts at the first frame without one; frames are independent, so no
+//! native flac container reader: id3v2 tags in front, streaminfo, seektable,
+//! skipped metadata blocks, and one frame per packet; the codec verifies each
+//! frame's checksums. frame boundaries are found by scanning for the next
+//! valid frame header whose preceding crc-16 matches, so a frame must fit
+//! options.bufferCapacity(). seeking jumps to the nearest seektable point, or
+//! restarts at the first frame without one; frames are independent, so no
 //! decoding history is needed.
 const std = @import("std");
 const types = @import("../types.zig");
@@ -15,39 +15,39 @@ const Self = @This();
 allocator: std.mem.Allocator,
 source: Source,
 metadata: types.Info,
-/// Fixed storage allocated by init; packets borrow it.
+/// fixed storage allocated by init; packets borrow it.
 buffer: []u8,
 start: usize = 0,
 end: usize = 0,
 eof: bool = false,
-/// First sample number of the next packet.
+/// first sample number of the next packet.
 frame: u64 = 0,
-/// Absolute offset of the first frame, which SEEKTABLE offsets are relative to.
+/// absolute offset of the first frame, which seektable offsets are relative to.
 data_start: u64,
-/// Absolute offset and point count of the SEEKTABLE; zero points when absent.
+/// absolute offset and point count of the seektable; zero points when absent.
 table_offset: u64 = 0,
 table_points: u32 = 0,
-/// Samples per frame of fixed-blocksize streams, which number their frames.
+/// samples per frame of fixed-blocksize streams, which number their frames.
 fixed_block: u16,
 
 const Frame = struct { len: usize, block_size: u32 };
 
-/// A SEEKTABLE point: the first sample of a frame and the frame's offset.
+/// a seektable point: the first sample of a frame and the frame's offset.
 const Point = struct { sample: u64, offset: u64 };
 
 const point_size = 18;
 
-/// Recognize the fLaC marker or an ID3v2 tag in front of it; the dispatcher
+/// recognize the fLaC marker or an id3v2 tag in front of it; the dispatcher
 /// already consumed these four bytes.
 pub fn probe(prefix: []const u8) bool {
     return std.mem.eql(u8, prefix, "fLaC")
         or std.mem.startsWith(u8, prefix, "ID3");
 }
 
-/// Skip any ID3v2 tags, read STREAMINFO and skip all other metadata blocks,
+/// skip any id3v2 tags, read streaminfo and skip all other metadata blocks,
 /// leaving the source at the first frame. prefix holds the four bytes the
 /// dispatcher consumed.
-/// Allocates source state and the frame buffer here.
+/// allocates source state and the frame buffer here.
 pub fn init(
     allocator: std.mem.Allocator,
     source: Source,
@@ -130,7 +130,7 @@ pub fn init(
     };
 }
 
-/// Skip the rest of an ID3v2 tag whose first four bytes were read, including
+/// skip the rest of an id3v2 tag whose first four bytes were read, including
 /// a footer when the header announces one; return the bytes skipped.
 fn skipTag(reader: *std.Io.Reader) types.Error!u64 {
     var header: [6]u8 = undefined;
@@ -145,13 +145,13 @@ fn skipTag(reader: *std.Io.Reader) types.Error!u64 {
     return header.len + size;
 }
 
-/// Frames are delimited here, so only packet framing is meaningful.
+/// frames are delimited here, so only packet framing is meaningful.
 pub fn configure(_: *Self, scheme: types.InputScheme) types.Error!void {
     if (scheme != .packets) return error.UnsupportedEncoding;
 }
 
-/// Borrow the next complete frame until the next call; end follows the last
-/// frame. Input that does not end on a valid frame returns InvalidData.
+/// borrow the next complete frame until the next call; end follows the last
+/// frame. input that does not end on a valid frame returns InvalidData.
 pub fn next(self: *Self) types.Error!PacketSource.Event {
     while (true) {
         const data = self.buffer[self.start..self.end];
@@ -182,8 +182,8 @@ pub fn next(self: *Self) types.Error!PacketSource.Event {
     }
 }
 
-/// Measure the frame starting data, or return null when more input is needed.
-/// A frame ends where the next valid header follows its CRC-16; the final
+/// measure the frame starting data, or return null when more input is needed.
+/// a frame ends where the next valid header follows its crc-16; the final
 /// frame runs to the end of the input and the codec validates it.
 fn frameAt(self: *const Self, data: []const u8) types.Error!?Frame {
     const header = flac.parseHeader(data)
@@ -191,7 +191,7 @@ fn frameAt(self: *const Self, data: []const u8) types.Error!?Frame {
             error.TruncatedData => if (self.eof) return err else return null,
             error.InvalidData => return err,
         };
-    // One running CRC over the bytes before each candidate keeps this linear
+    // one running crc over the bytes before each candidate keeps this linear
     // in the buffer size however many false sync codes it holds.
     var crc: u16 = 0;
     var done: usize = 0;
@@ -226,13 +226,13 @@ fn refill(self: *Self) types.Error!void {
     if (self.end < self.buffer.len) self.eof = true;
 }
 
-/// total_frames is null when STREAMINFO does not record the sample count.
+/// total_frames is null when streaminfo does not record the sample count.
 pub fn info(self: *const Self) types.Info {
     return self.metadata;
 }
 
-/// Restart at the last SEEKTABLE point at or before frame, or at the first
-/// frame when none qualifies. The landing frame's own header must carry the
+/// restart at the last seektable point at or before frame, or at the first
+/// frame when none qualifies. the landing frame's own header must carry the
 /// point's sample number, so a wrong table fails instead of misplacing audio.
 pub fn seek(self: *Self, frame: u64) types.Error!PacketSource.SeekResult {
     const point = try self.pointBefore(frame);
@@ -261,7 +261,7 @@ pub fn seek(self: *Self, frame: u64) types.Error!PacketSource.SeekResult {
     return .{ .frame = anchor };
 }
 
-/// Binary search the SEEKTABLE in the source. Placeholder points sort last
+/// binary search the seektable in the source. placeholder points sort last
 /// and are only reachable from the largest frame numbers, where the landing
 /// check in seek rejects them.
 fn pointBefore(self: *Self, frame: u64) types.Error!Point {
@@ -289,7 +289,7 @@ fn pointBefore(self: *Self, frame: u64) types.Error!Point {
     return found;
 }
 
-/// Parse the header of the buffered frame, reading more input as needed.
+/// parse the header of the buffered frame, reading more input as needed.
 fn peekHeader(self: *Self) types.Error!flac.Header {
     while (true) {
         return flac.parseHeader(self.buffer[self.start..self.end])
@@ -304,14 +304,14 @@ fn peekHeader(self: *Self) types.Error!flac.Header {
     }
 }
 
-/// Release the frame buffer and state.
+/// release the frame buffer and state.
 pub fn deinit(self: *Self) void {
     const allocator = self.allocator;
     allocator.free(self.buffer);
     allocator.destroy(self);
 }
 
-/// Report input that ends early as TruncatedData.
+/// report input that ends early as TruncatedData.
 fn short(
     result: anytype,
 ) types.Error!@typeInfo(@TypeOf(result)).error_union.payload {
@@ -326,8 +326,8 @@ const testing = std.testing;
 const Decoder = @import("../Decoder.zig");
 const Md5 = std.crypto.hash.Md5;
 
-/// ffmpeg-encoded: LPC, fixed predictors, mid/side, 24-bit mono, verbatim.
-/// Each carries the MD5 of its decoded samples in STREAMINFO.
+/// ffmpeg-encoded: lpc, fixed predictors, mid/side, 24-bit mono, verbatim.
+/// each carries the md5 of its decoded samples in streaminfo.
 const fixtures = [_][]const u8{
     @embedFile("../testdata/stereo_lpc.flac"),
     @embedFile("../testdata/stereo_fixed.flac"),
@@ -337,13 +337,13 @@ const fixtures = [_][]const u8{
     @embedFile("../testdata/stereo_seektable.flac"),
 };
 
-/// Fixtures keep STREAMINFO at byte 8: total samples, bit depth and the MD5
+/// fixtures keep streaminfo at byte 8: total samples, bit depth and the md5
 /// of the decoded integers live there.
 fn streamInfoFields(file: []const u8) u64 {
     return std.mem.readInt(u64, file[18..26], .big);
 }
 
-/// How a test reads a file: decoder options, frames per read, and whether the
+/// how a test reads a file: decoder options, frames per read, and whether the
 /// source can seek.
 const Read = struct {
     options: types.Options = .{},
@@ -351,7 +351,7 @@ const Read = struct {
     seekable: bool = true,
 };
 
-/// Decode a whole file, hashing the reconstructed integers like STREAMINFO
+/// decode a whole file, hashing the reconstructed integers like streaminfo
 /// does, and return the frame count.
 fn decodeAll(
     allocator: std.mem.Allocator,
@@ -620,7 +620,7 @@ test "seeking lands exactly on any frame, with or without a seek table" {
         const total = decoder.info().total_frames.?;
         const stride: u64 = if (total > 5000) 61 else 1;
         var frame: u64 = total;
-        // Walk backwards and forwards so both seek directions are covered.
+        // walk backwards and forwards so both seek directions are covered.
         while (true) : (frame -= stride) {
             try expectSeek(&decoder, samples, frame);
             if (frame < stride) break;
@@ -642,7 +642,7 @@ test "seeking uses the seek table instead of decoding from the start" {
     var file = fixtures[5][0..fixtures[5].len].*;
     const samples = try decodeSamples(testing.allocator, &file, true);
     defer testing.allocator.free(samples);
-    // Frames before the point at sample 9216 are destroyed.
+    // frames before the point at sample 9216 are destroyed.
     @memset(file[180 + 16..9668 + 180 - 16], 0);
     var reader = std.Io.Reader.fixed(&file);
     var decoder = try Decoder.init(
@@ -720,7 +720,7 @@ test "packets after a seek carry the landing timestamp" {
     }
 }
 
-/// An ID3v2.4 tag in front of a file; its payload is sync-like bytes that
+/// an id3v2.4 tag in front of a file; its payload is sync-like bytes that
 /// must never be scanned.
 const Tag = struct { size: u32, footer: bool = false };
 

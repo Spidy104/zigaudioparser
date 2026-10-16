@@ -1,6 +1,6 @@
-//! Native FLAC frame decoder (RFC 9639): one complete frame per packet.
-//! Supports 1-8 channels at 4-24 bits per sample, so every sample converts to
-//! f32 exactly. Frames carry no inter-frame state.
+//! native flac frame decoder (rfc 9639): one complete frame per packet.
+//! supports 1-8 channels at 4-24 bits per sample, so every sample converts to
+//! f32 exactly. frames carry no inter-frame state.
 const std = @import("std");
 const types = @import("../types.zig");
 const Codec = @import("../Codec.zig");
@@ -9,15 +9,15 @@ const Self = @This();
 
 pub const Error = types.Error;
 pub const Config = types.FlacConfig;
-/// FLAC frames are independent, so a seek needs no earlier frames.
+/// flac frames are independent, so a seek needs no earlier frames.
 pub const preroll_frames: u64 = 0;
 
 allocator: std.mem.Allocator,
 config: types.FlacConfig,
 format: types.AudioFormat,
-/// One i32 plane of config.max_block samples per channel.
+/// one i32 plane of config.max_block samples per channel.
 planes: []i32,
-/// Exact power of two mapping integers to [-1, 1).
+/// exact power of two mapping integers to [-1, 1).
 scale: f32,
 
 const max_channels = 8;
@@ -26,17 +26,17 @@ const max_bits = 24;
 pub const min_block = 16;
 const max_block = 65535;
 
-/// Parsed frame header; sample_rate and bits are null when STREAMINFO supplies
+/// parsed frame header; sample_rate and bits are null when streaminfo supplies
 /// them.
 pub const Header = struct {
     variable: bool,
-    /// Frame number for fixed block size, first sample number for variable.
+    /// frame number for fixed block size, first sample number for variable.
     number: u64,
     block_size: u32,
     sample_rate: ?u32,
     bits: ?u8,
     assignment: u4,
-    /// Header length in bytes, including its CRC-8.
+    /// header length in bytes, including its crc-8.
     len: usize,
 
     pub fn channels(self: Header) u16 {
@@ -46,8 +46,8 @@ pub const Header = struct {
 
 const HeaderError = error{ InvalidData, TruncatedData };
 
-/// Slicing-by-8 tables for CRC-16 with polynomial 0x8005: tables[k][b] is the
-/// CRC of byte b followed by k zero bytes.
+/// slicing-by-8 tables for crc-16 with polynomial 0x8005: tables[k][b] is the
+/// crc of byte b followed by k zero bytes.
 const crc16_tables = blk: {
     @setEvalBranchQuota(100_000);
     var tables: [8][256]u16 = undefined;
@@ -67,8 +67,8 @@ const crc16_tables = blk: {
     break :blk tables;
 };
 
-/// Continue a CRC-16 (polynomial 0x8005, initial value 0, no reflection) over
-/// bytes, eight at a time. Start with state 0.
+/// continue a crc-16 (polynomial 0x8005, initial value 0, no reflection) over
+/// bytes, eight at a time. start with state 0.
 pub fn crc16(state: u16, bytes: []const u8) u16 {
     const t = &crc16_tables;
     var crc = state;
@@ -103,7 +103,7 @@ const rates = [_]u32{
     96000,
 };
 
-/// Parse and validate a frame header at the start of bytes. TruncatedData
+/// parse and validate a frame header at the start of bytes. TruncatedData
 /// means more input is needed; InvalidData means this is not a header.
 pub fn parseHeader(bytes: []const u8) HeaderError!Header {
     if (bytes.len >= 2 and (bytes[0] != 0xFF or bytes[1] & 0xFE != 0xF8)) {
@@ -170,7 +170,7 @@ fn takeInt(
     return std.mem.readInt(T, bytes[pos.*..][0..size], .big);
 }
 
-/// UTF-8 style number of up to 6 bytes (fixed) or 7 bytes (variable).
+/// utf-8 style number of up to 6 bytes (fixed) or 7 bytes (variable).
 fn codedNumber(bytes: []const u8, pos: *usize, variable: bool) HeaderError!u64 {
     const first = bytes[pos.*];
     const ones = @clz(~first);
@@ -191,7 +191,7 @@ fn codedNumber(bytes: []const u8, pos: *usize, variable: bool) HeaderError!u64 {
     return value;
 }
 
-/// Validate configuration and allocate the sample planes. UnitAdapter
+/// validate configuration and allocate the sample planes. UnitAdapter
 /// allocates max_block * channels f32 samples of output.
 pub fn init(
     allocator: std.mem.Allocator,
@@ -224,15 +224,15 @@ pub fn init(
     return adapter.interface(.flac);
 }
 
-/// FLAC frames are independent, so there is no history to clear.
+/// flac frames are independent, so there is no history to clear.
 pub fn reset(_: *Self) void {}
 
-/// Release the sample planes; UnitAdapter releases its PCM output.
+/// release the sample planes; UnitAdapter releases its pcm output.
 pub fn deinit(self: *Self) void {
     self.allocator.free(self.planes);
 }
 
-/// Decode exactly one frame (header through CRC-16) into interleaved f32.
+/// decode exactly one frame (header through crc-16) into interleaved f32.
 /// out must hold config.max_block * channels samples; returns frames written.
 pub fn decodeUnit(
     self: *Self,
@@ -285,7 +285,7 @@ fn plane(self: *const Self, channel: usize, block: usize) []i32 {
     return self.planes[channel * self.config.max_block..][0..block];
 }
 
-/// Subframe bit depth; the side channel needs one extra bit.
+/// subframe bit depth; the side channel needs one extra bit.
 fn width(self: *const Self, assignment: u4, channel: usize) u8 {
     const side = switch (assignment) {
         8, 10 => channel == 1,
@@ -369,7 +369,7 @@ fn warmup(
     for (out[0..order]) |*sample| sample.* = try b.readSigned(bits);
 }
 
-/// Partitioned Rice residuals for out[order..]; the order warm-up samples
+/// partitioned Rice residuals for out[order..]; the order warm-up samples
 /// are already in place.
 fn residual(b: *Bits, out: []i32, order: usize) error{ InvalidData }!void {
     const method = try b.read(2);
@@ -397,8 +397,8 @@ fn residual(b: *Bits, out: []i32, order: usize) error{ InvalidData }!void {
     }
 }
 
-/// Add the prediction to each residual in place, rejecting samples outside the
-/// subframe bit depth. Each restored sample depends on the previous one, so the
+/// add the prediction to each residual in place, rejecting samples outside the
+/// subframe bit depth. each restored sample depends on the previous one, so the
 /// speed comes from avoiding memory round trips: orders up to 12 are unrolled
 /// at compile time with the last samples held in registers, and higher orders
 /// keep only the newest eight there and read the rest with widening vector
@@ -417,7 +417,7 @@ fn restore(
     if (outside != 0) return error.InvalidData;
 }
 
-/// Unrolled restore for one order. It returns nonzero when a restored sample
+/// unrolled restore for one order. it returns nonzero when a restored sample
 /// falls outside bits; stored values are truncated, so out-of-range input
 /// cannot trap.
 fn Unrolled(comptime order: usize) type {
@@ -470,8 +470,8 @@ fn Unrolled(comptime order: usize) type {
     };
 }
 
-/// Orders above 12. The newest eight taps come from a register ring as in
-/// Unrolled; the older ones are at least eight samples old, so they can be
+/// orders above 12. the newest eight taps come from a register ring as in
+/// unrolled; the older ones are at least eight samples old, so they can be
 /// read back from memory four at a time without stalling on in-flight stores.
 fn restoreWide(out: []i32, coefficients: []const i32, shift: u6, bits: u8) u64 {
     const near = 8;
@@ -523,8 +523,8 @@ fn restoreWide(out: []i32, coefficients: []const i32, shift: u6, bits: u8) u64 {
     return outside | rest;
 }
 
-/// One sample at a time from memory; handles heads and tails of the faster
-/// paths. The first coefficients.len samples are history.
+/// one sample at a time from memory; handles heads and tails of the faster
+/// paths. the first coefficients.len samples are history.
 fn restoreScalar(
     out: []i32,
     coefficients: []const i32,
@@ -545,7 +545,7 @@ fn restoreScalar(
     return outside;
 }
 
-/// MSB-first reader over one CRC-verified frame body; any overrun means the
+/// msb-first reader over one crc-verified frame body; any overrun means the
 /// frame is malformed.
 const Bits = struct {
     bytes: []const u8,
@@ -555,7 +555,7 @@ const Bits = struct {
         return self.bytes.len * 8 - self.pos;
     }
 
-    /// The next 57 or more bits, left aligned and zero padded past the end.
+    /// the next 57 or more bits, left aligned and zero padded past the end.
     fn window(self: *const Bits) u64 {
         const index = self.pos >> 3;
         const word = if (index + 8 <= self.bytes.len)
@@ -585,7 +585,7 @@ const Bits = struct {
         return @as(i32, @bitCast(try self.read(count) << shift)) >> shift;
     }
 
-    /// Count zero bits up to and including a terminating one.
+    /// count zero bits up to and including a terminating one.
     fn unary(self: *Bits) error{ InvalidData }!u32 {
         var zeros: u32 = 0;
         while (true) {
@@ -601,7 +601,7 @@ const Bits = struct {
         }
     }
 
-    /// General path for one code, at any length and any distance from the end.
+    /// general path for one code, at any length and any distance from the end.
     fn rice(self: *Bits, parameter: u32) error{ InvalidData }!i32 {
         const quotient = try self.unary();
         const folded = @as(u64, quotient) << @intCast(parameter)
@@ -609,7 +609,7 @@ const Bits = struct {
         return unfold(folded);
     }
 
-    /// Decode samples.len Rice codes. Up to four codes share one window load,
+    /// decode samples.len Rice codes. up to four codes share one window load,
     /// which takes the load out of the dependency chain; codes that do not fit
     /// in the window take the general path.
     fn riceBlock(
@@ -648,7 +648,7 @@ const Bits = struct {
         for (samples[index..]) |*sample| sample.* = try self.rice(parameter);
     }
 
-    /// Undo the zigzag fold; residuals must stay within 32 bits and may not
+    /// undo the zigzag fold; residuals must stay within 32 bits and may not
     /// be -2^31.
     fn unfold(folded: u64) error{ InvalidData }!i32 {
         if (folded > 0xFFFF_FFFE) return error.InvalidData;
@@ -758,7 +758,7 @@ test "every restore path matches the plain recurrence" {
     }
 }
 
-/// Assembles frames bit by bit with valid CRCs.
+/// assembles frames bit by bit with valid CRCs.
 const Builder = struct {
     bytes: [8192]u8 = @splat(0),
     bits: usize = 0,
@@ -804,7 +804,7 @@ const Builder = struct {
         self.put(Crc8.hash(self.bytes[0..self.bits / 8]), 8);
     }
 
-    /// Mono or multichannel, 44.1 kHz, 16 bit, 16 samples.
+    /// mono or multichannel, 44.1 kHz, 16 bit, 16 samples.
     fn small(self: *Builder, assignment: u4) void {
         self.header(.{ .assignment = assignment }, &.{ 0, 15 });
     }
@@ -884,7 +884,7 @@ const ramp = [_]i32{
     146,
 };
 
-/// Residuals +1, -1 and twelve zeros (zigzag 2, 1, 0) after two warm-up
+/// residuals +1, -1 and twelve zeros (zigzag 2, 1, 0) after two warm-up
 /// samples.
 fn rampResidual(b: *Builder) void {
     b.put(0, 2);
