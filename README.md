@@ -91,13 +91,13 @@ The goal is to read, decode, convert, encode, and write mainstream audio formats
 - [ ] AC3.
 - [ ] ADPCM IMA WAV.
 - [ ] ADPCM Microsoft.
-- [ ] A-law.
+- [x] A-law.
 - [ ] ALAC.
 - [ ] DTS.
 - [ ] EAC3.
 - [x] FLAC (native).
 - [ ] MP3.
-- [ ] Mu-law.
+- [x] Mu-law.
 - [x] Opus (temporary libopus backend).
 - [x] Vorbis (temporary libvorbis backend).
 - [ ] Windows Media Audio 1.

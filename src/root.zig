@@ -34,5 +34,6 @@ pub const ogg = @import("containers/ogg/root.zig");
 
 test {
     _ = @import("codecs/flac.zig");
+    _ = @import("codecs/g711.zig");
     _ = @import("containers/Flac.zig");
 }
