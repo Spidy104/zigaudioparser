@@ -1,8 +1,10 @@
-//! Native FLAC container reader: STREAMINFO, skipped metadata blocks, and one
-//! frame per packet; the codec verifies each frame's checksums. Seeking is not
-//! supported yet. Frame boundaries are found by scanning for the next valid
+//! Native FLAC container reader: STREAMINFO, SEEKTABLE, skipped metadata
+//! blocks, and one frame per packet; the codec verifies each frame's
+//! checksums. Frame boundaries are found by scanning for the next valid
 //! frame header whose preceding CRC-16 matches, so a frame must fit
-//! options.bufferCapacity().
+//! options.bufferCapacity(). Seeking jumps to the nearest SEEKTABLE point,
+//! or restarts at the first frame without one; frames are independent, so no
+//! decoding history is needed.
 const std = @import("std");
 const types = @import("../types.zig");
 const Source = @import("../Source.zig");
@@ -20,8 +22,20 @@ end: usize = 0,
 eof: bool = false,
 /// First sample number of the next packet.
 frame: u64 = 0,
+/// Absolute offset of the first frame, which SEEKTABLE offsets are relative to.
+data_start: u64,
+/// Absolute offset and point count of the SEEKTABLE; zero points when absent.
+table_offset: u64 = 0,
+table_points: u32 = 0,
+/// Samples per frame of fixed-blocksize streams, which number their frames.
+fixed_block: u16,
 
 const Frame = struct { len: usize, block_size: u32 };
+
+/// A SEEKTABLE point: the first sample of a frame and the frame's offset.
+const Point = struct { sample: u64, offset: u64 };
+
+const point_size = 18;
 
 /// Recognize the fLaC marker; the dispatcher already consumed these four bytes.
 pub fn probe(prefix: []const u8) bool {
@@ -41,9 +55,14 @@ pub fn init(
     const reader = source.reader;
     var streaminfo: [34]u8 = undefined;
     var first = true;
+    var table_offset: u64 = 0;
+    var table_points: u32 = 0;
+    // The dispatcher consumed the four-byte marker.
+    var position: u64 = 4;
     while (true) {
         var head: [4]u8 = undefined;
         try short(reader.readSliceAll(&head));
+        position += head.len;
         const length = std.mem.readInt(u24, head[1..4], .big);
         if (first) {
             if (head[0] & 0x7F != 0 or length != streaminfo.len) {
@@ -53,8 +72,16 @@ pub fn init(
             first = false;
         } else {
             if (head[0] & 0x7F == 127) return error.InvalidData;
+            if (head[0] & 0x7F == 3) {
+                if (table_offset != 0 or length % point_size != 0) {
+                    return error.InvalidData;
+                }
+                table_offset = position;
+                table_points = length / point_size;
+            }
             try short(reader.discardAll(length));
         }
+        position += length;
         if (head[0] & 0x80 != 0) break;
     }
     const min_block = std.mem.readInt(u16, streaminfo[0..2], .big);
@@ -81,12 +108,16 @@ pub fn init(
             .channels = channels,
             .total_frames = if (total == 0) null else total,
         },
+        .data_start = position,
+        .table_offset = table_offset,
+        .table_points = table_points,
+        .fixed_block = max_block,
     };
     return .{
         .backend = .{ .flac = self },
         .encoding = .{ .flac = .{ .max_block = max_block, .bits = bits } },
         .format = .{ .sample_rate = sample_rate, .channels = channels },
-        .seekable = false,
+        .seekable = source.seek_to != null,
         .max_payload_bytes = options.max_payload_bytes,
     };
 }
@@ -177,9 +208,77 @@ pub fn info(self: *const Self) types.Info {
     return self.metadata;
 }
 
-/// Seeking is not supported yet.
-pub fn seek(_: *Self, _: u64) types.Error!PacketSource.SeekResult {
-    return error.Unseekable;
+/// Restart at the last SEEKTABLE point at or before frame, or at the first
+/// frame when none qualifies. The landing frame's own header must carry the
+/// point's sample number, so a wrong table fails instead of misplacing audio.
+pub fn seek(self: *Self, frame: u64) types.Error!PacketSource.SeekResult {
+    const point = try self.pointBefore(frame);
+    const offset = std.math.add(u64, self.data_start, point.offset)
+        catch return error.InvalidData;
+    self.source.seekTo(offset)
+        catch |err| switch (err) {
+            error.EndOfStream => return error.InvalidData,
+            else => return err,
+        };
+    self.start = 0;
+    self.end = 0;
+    self.eof = false;
+    if (point.sample != 0 or point.offset != 0) {
+        const header = try self.peekHeader();
+        const number = if (header.variable)
+            header.number
+        else
+            std.math.mul(u64, header.number, self.fixed_block)
+                catch return error.InvalidData;
+        if (number != point.sample) return error.InvalidData;
+    }
+    self.frame = point.sample;
+    const anchor = std.math.cast(i64, point.sample)
+        orelse return error.InvalidData;
+    return .{ .frame = anchor };
+}
+
+/// Binary search the SEEKTABLE in the source. Placeholder points sort last
+/// and are only reachable from the largest frame numbers, where the landing
+/// check in seek rejects them.
+fn pointBefore(self: *Self, frame: u64) types.Error!Point {
+    var found: Point = .{ .sample = 0, .offset = 0 };
+    var low: u32 = 0;
+    var high = self.table_points;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        try self.source.seekTo(
+            self.table_offset + @as(u64, middle) * point_size,
+        );
+        var bytes: [16]u8 = undefined;
+        try short(self.source.reader.readSliceAll(&bytes));
+        const point: Point = .{
+            .sample = std.mem.readInt(u64, bytes[0..8], .big),
+            .offset = std.mem.readInt(u64, bytes[8..16], .big),
+        };
+        if (point.sample <= frame) {
+            found = point;
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    return found;
+}
+
+/// Parse the header of the buffered frame, reading more input as needed.
+fn peekHeader(self: *Self) types.Error!flac.Header {
+    while (true) {
+        return flac.parseHeader(self.buffer[self.start..self.end])
+            catch |err| switch (err) {
+                error.InvalidData => err,
+                error.TruncatedData => {
+                    if (self.eof) return err;
+                    try self.refill();
+                    continue;
+                },
+            };
+    }
 }
 
 /// Release the frame buffer and state.
@@ -212,6 +311,7 @@ const fixtures = [_][]const u8{
     @embedFile("../testdata/stereo_mid_side.flac"),
     @embedFile("../testdata/mono_24bit.flac"),
     @embedFile("../testdata/noise_verbatim.flac"),
+    @embedFile("../testdata/stereo_seektable.flac"),
 };
 
 /// Fixtures keep STREAMINFO at byte 8: total samples, bit depth and the MD5
@@ -220,27 +320,33 @@ fn streamInfoFields(file: []const u8) u64 {
     return std.mem.readInt(u64, file[18..26], .big);
 }
 
+/// How a test reads a file: decoder options, frames per read, and whether the
+/// source can seek.
+const Read = struct {
+    options: types.Options = .{},
+    chunk: usize = 64,
+    seekable: bool = true,
+};
+
 /// Decode a whole file, hashing the reconstructed integers like STREAMINFO
 /// does, and return the frame count.
 fn decodeAll(
     allocator: std.mem.Allocator,
     file: []const u8,
-    options: types.Options,
-    chunk: usize,
-    seekable: bool,
+    read: Read,
     digest: *[16]u8,
 ) !u64 {
     var reader = std.Io.Reader.fixed(file);
-    const source = if (seekable)
+    const source = if (read.seekable)
         Source.fromFixed(&reader)
     else
         Source.fromReader(&reader);
-    var decoder = try Decoder.initOptions(allocator, source, options);
+    var decoder = try Decoder.initOptions(allocator, source, read.options);
     defer decoder.deinit();
     const channels = decoder.info().channels;
     const depth: u5 = @intCast(streamInfoFields(file) >> 36 & 31);
     const scale: f32 = @floatFromInt(@as(u32, 1) << depth);
-    const out = try allocator.alloc(f32, chunk * channels);
+    const out = try allocator.alloc(f32, read.chunk * channels);
     defer allocator.free(out);
     var md5 = Md5.init(.{});
     var frames: u64 = 0;
@@ -263,26 +369,17 @@ fn decodeAll(
 fn expectExact(
     allocator: std.mem.Allocator,
     file: []const u8,
-    options: types.Options,
-    chunk: usize,
-    seekable: bool,
+    read: Read,
 ) !void {
     var digest: [16]u8 = undefined;
-    const frames = try decodeAll(
-        allocator,
-        file,
-        options,
-        chunk,
-        seekable,
-        &digest,
-    );
+    const frames = try decodeAll(allocator, file, read, &digest);
     try testing.expectEqualSlices(u8, file[26..42], &digest);
     try testing.expectEqual(streamInfoFields(file) & (1 << 36) - 1, frames);
 }
 
 fn decodeBytes(file: []const u8, options: types.Options) !u64 {
     var digest: [16]u8 = undefined;
-    return decodeAll(testing.allocator, file, options, 64, true, &digest);
+    return decodeAll(testing.allocator, file, .{ .options = options }, &digest);
 }
 
 test "fixtures decode to their STREAMINFO MD5 at any read size" {
@@ -293,9 +390,11 @@ test "fixtures decode to their STREAMINFO MD5 at any read size" {
                     try expectExact(
                         testing.allocator,
                         fixture,
-                        .{ .buffer_bytes = buffer },
-                        chunk,
-                        seekable,
+                        .{
+                            .options = .{ .buffer_bytes = buffer },
+                            .chunk = chunk,
+                            .seekable = seekable,
+                        },
                     );
                 }
             }
@@ -328,7 +427,7 @@ test "allocation failures are reported, not leaked" {
         try testing.checkAllAllocationFailures(
             testing.allocator,
             expectExact,
-            .{ fixtures[which], types.Options{}, @as(usize, 7), true },
+            .{ fixtures[which], Read{ .chunk = 7 } },
         );
     }
 }
@@ -441,4 +540,155 @@ test "malformed metadata" {
         error.UnsupportedFormat,
         decodeBytes("ID3\x03", .{}),
     );
+}
+
+fn decodeSamples(allocator: std.mem.Allocator, file: []const u8) ![]f32 {
+    var reader = std.Io.Reader.fixed(file);
+    var decoder = try Decoder.init(allocator, Source.fromFixed(&reader));
+    defer decoder.deinit();
+    const channels = decoder.info().channels;
+    const total: usize = @intCast(decoder.info().total_frames.?);
+    const samples = try allocator.alloc(f32, total * channels);
+    errdefer allocator.free(samples);
+    var done: usize = 0;
+    while (done < samples.len) {
+        const got = try decoder.read(samples[done..]);
+        if (got == 0) return error.TestUnexpectedResult;
+        done += got * channels;
+    }
+    return samples;
+}
+
+fn expectSeek(decoder: *Decoder, samples: []const f32, frame: u64) !void {
+    const channels = decoder.info().channels;
+    try decoder.seekFrame(frame);
+    try testing.expectEqual(frame, decoder.tellFrame());
+    var out: [50 * 8]f32 = undefined;
+    const rest = samples.len / channels - frame;
+    const want = @min(rest, 50);
+    var done: usize = 0;
+    while (done < want) {
+        const got = try decoder.read(out[0..(want - done) * channels]);
+        try testing.expect(got != 0);
+        const at = (frame + done) * channels;
+        try testing.expectEqualSlices(
+            f32,
+            samples[at..][0..got * channels],
+            out[0..got * channels],
+        );
+        done += got;
+    }
+}
+
+test "seeking lands exactly on any frame, with or without a seek table" {
+    for (fixtures) |file| {
+        const samples = try decodeSamples(testing.allocator, file);
+        defer testing.allocator.free(samples);
+        var reader = std.Io.Reader.fixed(file);
+        var decoder = try Decoder.init(
+            testing.allocator,
+            Source.fromFixed(&reader),
+        );
+        defer decoder.deinit();
+        const total = decoder.info().total_frames.?;
+        const stride: u64 = if (total > 5000) 61 else 1;
+        var frame: u64 = total;
+        // Walk backwards and forwards so both seek directions are covered.
+        while (true) : (frame -= stride) {
+            try expectSeek(&decoder, samples, frame);
+            if (frame < stride) break;
+        }
+        frame = 0;
+        while (frame <= total) : (frame += stride) {
+            try expectSeek(&decoder, samples, frame);
+        }
+        for (
+            [_]u64{ 1152, 2303, 2304, 2305, 9215, 9216, 9217, total - 1 },
+        ) |at| {
+            if (at <= total) try expectSeek(&decoder, samples, at);
+        }
+        try testing.expectError(error.OutOfRange, decoder.seekFrame(total + 1));
+    }
+}
+
+test "seeking uses the seek table instead of decoding from the start" {
+    var file = fixtures[5][0..fixtures[5].len].*;
+    const samples = try decodeSamples(testing.allocator, &file);
+    defer testing.allocator.free(samples);
+    // Frames before the point at sample 9216 are destroyed.
+    @memset(file[180 + 16..9668 + 180 - 16], 0);
+    var reader = std.Io.Reader.fixed(&file);
+    var decoder = try Decoder.init(
+        testing.allocator,
+        Source.fromFixed(&reader),
+    );
+    defer decoder.deinit();
+    try expectSeek(&decoder, samples, 9300);
+    try testing.expectError(error.InvalidData, decoder.seekFrame(100));
+}
+
+test "a seek table that disagrees with the frames is rejected" {
+    const point_sample = 42 + 4 + 18 * 2;
+    const point_offset = point_sample + 8;
+    for (
+        [_]usize{ point_sample + 7, point_offset + 7, point_offset + 1 },
+    ) |where| {
+        var file = fixtures[5][0..fixtures[5].len].*;
+        file[where] +%= 1;
+        var reader = std.Io.Reader.fixed(&file);
+        var decoder = try Decoder.init(
+            testing.allocator,
+            Source.fromFixed(&reader),
+        );
+        defer decoder.deinit();
+        try testing.expectError(error.InvalidData, decoder.seekFrame(6000));
+    }
+}
+
+test "streaming input cannot seek" {
+    var reader = std.Io.Reader.fixed(fixtures[5]);
+    var decoder = try Decoder.init(
+        testing.allocator,
+        Source.fromReader(&reader),
+    );
+    defer decoder.deinit();
+    try testing.expectError(error.Unseekable, decoder.seekFrame(0));
+}
+
+test "malformed seek tables are rejected" {
+    const head = fixtures[5][0..42];
+    const odd_length = [_]u8{ 0x83, 0, 0, 17 } ++ [_]u8{0} ** 17;
+    const twice = [_]u8{ 0x03, 0, 0, 0, 0x83, 0, 0, 0 };
+    const cases = [_][]const u8{ &odd_length, &twice };
+    for (cases) |tail| {
+        var file: [64]u8 = undefined;
+        @memcpy(file[0..42], head);
+        @memcpy(file[42..][0..tail.len], tail);
+        var reader = std.Io.Reader.fixed(file[0..42 + tail.len]);
+        try testing.expectError(
+            error.InvalidData,
+            Decoder.init(testing.allocator, Source.fromFixed(&reader)),
+        );
+    }
+}
+
+test "packets after a seek carry the landing timestamp" {
+    var reader = std.Io.Reader.fixed(fixtures[5]);
+    var packets = try PacketSource.init(
+        testing.allocator,
+        Source.fromFixed(&reader),
+        .{},
+    );
+    defer packets.deinit();
+    try packets.configure(.packets);
+    try testing.expectError(
+        error.InvalidData,
+        packets.seek(std.math.maxInt(u64)),
+    );
+    for ([_][2]i64{ .{ 9300, 9216 }, .{ 9216, 9216 }, .{ 3, 0 } }) |pair| {
+        const anchor = try packets.seek(@intCast(pair[0]));
+        try testing.expectEqual(pair[1], anchor.frame);
+        const event = try packets.next();
+        try testing.expectEqual(pair[1], event.packet.timestamp.?.value);
+    }
 }

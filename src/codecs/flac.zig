@@ -410,60 +410,68 @@ fn restore(
     bits: u8,
 ) error{ InvalidData }!void {
     const outside = switch (coefficients.len) {
-        inline 0...12 => |order| restoreRing(
-                order,
-                out,
-                coefficients,
-                shift,
-                bits,
-            ),
+        inline 0...12 => |order| Unrolled(order)
+                .restore(out, coefficients, shift, bits),
         else => restoreWide(out, coefficients, shift, bits),
     };
     if (outside != 0) return error.InvalidData;
 }
 
-/// Returns nonzero when a restored sample falls outside bits. Stored values are
-/// truncated, so out-of-range input cannot trap.
-fn restoreRing(
-    comptime order: usize,
-    out: []i32,
-    coefficients: []const i32,
-    shift: u6,
-    bits: u8,
-) u64 {
-    @setEvalBranchQuota(10_000);
-    const limit = @as(i64, 1) << @intCast(bits - 1);
-    var outside: u64 = 0;
-    if (order == 0) {
-        for (out) |sample| {
-            outside |= @as(u64, @bitCast(sample + limit)) >> @intCast(bits);
-        }
-        return outside;
-    }
-    var taps: [order]i64 = undefined;
-    for (&taps, coefficients[0..order]) |*tap, coefficient| tap.* = coefficient;
-    var ring: [order]i64 = undefined;
-    for (&ring, out[0..order]) |*slot, sample| slot.* = sample;
-    var index: usize = order;
-    while (index + order <= out.len) : (index += order) {
-        inline for (0..order) |step| {
-            var sum: i64 = 0;
-            inline for (0..order) |back| {
-                sum += taps[back] * ring[(step + order - 1 - back) % order];
+/// Unrolled restore for one order. It returns nonzero when a restored sample
+/// falls outside bits; stored values are truncated, so out-of-range input
+/// cannot trap.
+fn Unrolled(comptime order: usize) type {
+    return struct {
+        fn restore(
+            out: []i32,
+            coefficients: []const i32,
+            shift: u6,
+            bits: u8,
+        ) u64 {
+            @setEvalBranchQuota(10_000);
+            const limit = @as(i64, 1) << @intCast(bits - 1);
+            var outside: u64 = 0;
+            if (order == 0) {
+                for (out) |sample| {
+                    outside |= @as(u64, @bitCast(sample + limit))
+                        >> @intCast(bits);
+                }
+                return outside;
             }
-            const value = (sum >> shift) + out[index + step];
-            outside |= @as(u64, @bitCast(value + limit)) >> @intCast(bits);
-            const stored: i32 = @truncate(value);
-            out[index + step] = stored;
-            ring[step] = stored;
+            var taps: [order]i64 = undefined;
+            for (&taps, coefficients[0..order]) |*tap, coefficient|
+                tap.* = coefficient;
+            var ring: [order]i64 = undefined;
+            for (&ring, out[0..order]) |*slot, sample| slot.* = sample;
+            var index: usize = order;
+            while (index + order <= out.len) : (index += order) {
+                inline for (0..order) |step| {
+                    var sum: i64 = 0;
+                    inline for (0..order) |back| {
+                        sum += taps[back]
+                            * ring[(step + order - 1 - back) % order];
+                    }
+                    const value = (sum >> shift) + out[index + step];
+                    outside |= @as(u64, @bitCast(value + limit))
+                        >> @intCast(bits);
+                    const stored: i32 = @truncate(value);
+                    out[index + step] = stored;
+                    ring[step] = stored;
+                }
+            }
+            return outside
+                | restoreScalar(
+                    out[index - order..],
+                    coefficients,
+                    shift,
+                    bits,
+                );
         }
-    }
-    return outside
-        | restoreScalar(out[index - order..], coefficients, shift, bits);
+    };
 }
 
 /// Orders above 12. The newest eight taps come from a register ring as in
-/// restoreRing; the older ones are at least eight samples old, so they can be
+/// Unrolled; the older ones are at least eight samples old, so they can be
 /// read back from memory four at a time without stalling on in-flight stores.
 fn restoreWide(out: []i32, coefficients: []const i32, shift: u6, bits: u8) u64 {
     const near = 8;
@@ -778,24 +786,27 @@ const Builder = struct {
         self.put(1, 1);
     }
 
-    fn header(
-        self: *Builder,
-        size: u4,
-        rate: u4,
-        assignment: u4,
-        bits: u3,
-        tail: []const u8,
-    ) void {
+    const Fields = struct {
+        size: u4 = 6,
+        rate: u4 = 9,
+        assignment: u4 = 0,
+        bits: u3 = 4,
+    };
+
+    fn header(self: *Builder, fields: Fields, tail: []const u8) void {
         self.put(@as(u16, 0xFFF8) | @intFromBool(self.variable), 16);
-        self.put(@as(u8, size) << 4 | rate, 8);
-        self.put(@as(u8, assignment) << 4 | @as(u8, bits) << 1, 8);
+        self.put(@as(u8, fields.size) << 4 | fields.rate, 8);
+        self.put(
+            @as(u8, fields.assignment) << 4 | @as(u8, fields.bits) << 1,
+            8,
+        );
         for (tail) |byte| self.put(byte, 8);
         self.put(Crc8.hash(self.bytes[0..self.bits / 8]), 8);
     }
 
     /// Mono or multichannel, 44.1 kHz, 16 bit, 16 samples.
     fn small(self: *Builder, assignment: u4) void {
-        self.header(6, 9, assignment, 4, &.{ 0, 15 });
+        self.header(.{ .assignment = assignment }, &.{ 0, 15 });
     }
 
     fn subframe(self: *Builder, kind: u7, wasted: ?usize) void {
@@ -898,19 +909,19 @@ test "final blocks may be shorter than 16 samples" {
     var codec = try testCodec(1, 16);
     defer codec.deinit();
     var b = Builder{};
-    b.header(6, 9, 0, 4, &.{ 0, 4 });
+    b.header(.{}, &.{ 0, 4 });
     b.subframe(0, null);
     b.putSigned(77, 16);
     try expectFrame(&codec, b.finish(), &([_]i32{77} ** 5));
 
     b = Builder{};
-    b.header(6, 9, 0, 4, &.{ 0, 0 });
+    b.header(.{}, &.{ 0, 0 });
     b.subframe(1, null);
     b.putSigned(-9, 16);
     try expectFrame(&codec, b.finish(), &[_]i32{-9});
 
     b = Builder{};
-    b.header(6, 9, 0, 4, &.{ 0, 2 });
+    b.header(.{}, &.{ 0, 2 });
     b.subframe(9, null);
     b.putSigned(5, 16);
     b.put(0, 2);
@@ -1085,7 +1096,10 @@ test "independent channels keep their order" {
 test "frame header fields" {
     var b = Builder{};
     b.variable = true;
-    b.header(8, 12, 1, 6, &.{ 0xF0, 0x9F, 0x80, 0x80, 48 });
+    b.header(
+        .{ .size = 8, .rate = 12, .assignment = 1, .bits = 6 },
+        &.{ 0xF0, 0x9F, 0x80, 0x80, 48 },
+    );
     const header = try parseHeader(b.written());
     try testing.expect(header.variable);
     try testing.expectEqual(@as(u64, 0x1F000), header.number);
@@ -1096,7 +1110,10 @@ test "frame header fields" {
     try testing.expectEqual(b.bits / 8, header.len);
 
     b = Builder{};
-    b.header(7, 14, 8, 0, &.{ 0x7F, 0x03, 0xFF, 0x00, 0x2C });
+    b.header(
+        .{ .size = 7, .rate = 14, .assignment = 8, .bits = 0 },
+        &.{ 0x7F, 0x03, 0xFF, 0x00, 0x2C },
+    );
     const uncommon = try parseHeader(b.written());
     try testing.expect(!uncommon.variable);
     try testing.expectEqual(@as(u64, 0x7F), uncommon.number);
@@ -1109,12 +1126,12 @@ test "coded numbers" {
     const longest = [_]u8{ 0xFE, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF };
     var b = Builder{};
     b.variable = true;
-    b.header(1, 9, 0, 4, &longest);
+    b.header(.{ .size = 1 }, &longest);
     const header = try parseHeader(b.written());
     try testing.expectEqual((@as(u64, 1) << 36) - 1, header.number);
 
     b = Builder{};
-    b.header(1, 9, 0, 4, &longest);
+    b.header(.{ .size = 1 }, &longest);
     try testing.expectError(error.InvalidData, parseHeader(b.written()));
 
     const malformed = [_][]const u8{
@@ -1125,7 +1142,7 @@ test "coded numbers" {
     for (malformed) |tail| {
         b = Builder{};
         b.variable = true;
-        b.header(1, 9, 0, 4, tail);
+        b.header(.{ .size = 1 }, tail);
         try testing.expectError(error.InvalidData, parseHeader(b.written()));
     }
 }
@@ -1139,7 +1156,15 @@ test "invalid headers" {
     };
     for (cases) |case| {
         var b = Builder{};
-        b.header(case[0], case[1], case[2], case[3], &.{0});
+        b.header(
+            .{
+                .size = case[0],
+                .rate = case[1],
+                .assignment = case[2],
+                .bits = case[3],
+            },
+            &.{0},
+        );
         try testing.expectError(error.InvalidData, parseHeader(b.written()));
     }
     var b = Builder{};
@@ -1155,7 +1180,10 @@ test "invalid headers" {
 
 test "every header prefix is truncated, never invalid" {
     var b = Builder{};
-    b.header(7, 13, 1, 5, &.{ 0xC2, 0xA0, 0x01, 0x00, 0xAC, 0x44 });
+    b.header(
+        .{ .size = 7, .rate = 13, .assignment = 1, .bits = 5 },
+        &.{ 0xC2, 0xA0, 0x01, 0x00, 0xAC, 0x44 },
+    );
     const length = b.bits / 8;
     for (0..length) |prefix| {
         try testing.expectError(
@@ -1316,7 +1344,7 @@ test "partition count must divide the block size" {
     defer codec.deinit();
     @memset(codec.planes, 0);
     var b = Builder{};
-    b.header(6, 9, 0, 4, &.{ 0, 16 });
+    b.header(.{}, &.{ 0, 16 });
     b.subframe(8, null);
     b.put(0, 2);
     b.put(1, 4);
@@ -1384,7 +1412,7 @@ test "frame level errors" {
     try expectFailure(&rate, frame, error.UnsupportedEncoding);
 
     b = Builder{};
-    b.header(13, 9, 0, 4, &.{0});
+    b.header(.{ .size = 13 }, &.{0});
     b.subframe(0, null);
     b.putSigned(0, 16);
     try expectFailure(&codec, b.finish(), error.LimitExceeded);
@@ -1434,7 +1462,10 @@ test "garbage frames with valid checksums never crash" {
                     else => @intCast(channels - 1),
                 };
                 const size = sizes[random.uintLessThan(usize, sizes.len)];
-                b.header(size, 9, assignment, 0, &.{0});
+                b.header(
+                    .{ .size = size, .assignment = assignment, .bits = 0 },
+                    &.{0},
+                );
                 const start = b.bits / 8;
                 const length = random.uintLessThan(usize, 600);
                 random.bytes(b.bytes[start..][0..length]);
