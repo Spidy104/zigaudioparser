@@ -1,5 +1,5 @@
-//! Native FLAC container reader: STREAMINFO, SEEKTABLE, skipped metadata
-//! blocks, and one frame per packet; the codec verifies each frame's
+//! Native FLAC container reader: ID3v2 tags in front, STREAMINFO, SEEKTABLE,
+//! skipped metadata blocks, and one frame per packet; the codec verifies each frame's
 //! checksums. Frame boundaries are found by scanning for the next valid
 //! frame header whose preceding CRC-16 matches, so a frame must fit
 //! options.bufferCapacity(). Seeking jumps to the nearest SEEKTABLE point,
@@ -37,13 +37,16 @@ const Point = struct { sample: u64, offset: u64 };
 
 const point_size = 18;
 
-/// Recognize the fLaC marker; the dispatcher already consumed these four bytes.
+/// Recognize the fLaC marker or an ID3v2 tag in front of it; the dispatcher
+/// already consumed these four bytes.
 pub fn probe(prefix: []const u8) bool {
-    return std.mem.eql(u8, prefix, "fLaC");
+    return std.mem.eql(u8, prefix, "fLaC")
+        or std.mem.startsWith(u8, prefix, "ID3");
 }
 
-/// Read STREAMINFO and skip all other metadata blocks, leaving the source at
-/// the first frame.
+/// Skip any ID3v2 tags, read STREAMINFO and skip all other metadata blocks,
+/// leaving the source at the first frame. prefix holds the four bytes the
+/// dispatcher consumed.
 /// Allocates source state and the frame buffer here.
 pub fn init(
     allocator: std.mem.Allocator,
@@ -51,14 +54,19 @@ pub fn init(
     prefix: [4]u8,
     options: types.Options,
 ) types.Error!PacketSource {
-    _ = prefix;
     const reader = source.reader;
+    var marker = prefix;
+    var position: u64 = marker.len;
+    while (std.mem.startsWith(u8, &marker, "ID3")) {
+        position += try skipTag(reader);
+        try short(reader.readSliceAll(&marker));
+        position += marker.len;
+    }
+    if (!std.mem.eql(u8, &marker, "fLaC")) return error.UnsupportedFormat;
     var streaminfo: [34]u8 = undefined;
     var first = true;
     var table_offset: u64 = 0;
     var table_points: u32 = 0;
-    // The dispatcher consumed the four-byte marker.
-    var position: u64 = 4;
     while (true) {
         var head: [4]u8 = undefined;
         try short(reader.readSliceAll(&head));
@@ -120,6 +128,21 @@ pub fn init(
         .seekable = source.seek_to != null,
         .max_payload_bytes = options.max_payload_bytes,
     };
+}
+
+/// Skip the rest of an ID3v2 tag whose first four bytes were read, including
+/// a footer when the header announces one; return the bytes skipped.
+fn skipTag(reader: *std.Io.Reader) types.Error!u64 {
+    var header: [6]u8 = undefined;
+    try short(reader.readSliceAll(&header));
+    var size: u32 = 0;
+    for (header[2..]) |byte| {
+        if (byte & 0x80 != 0) return error.InvalidData;
+        size = size << 7 | byte;
+    }
+    if (header[1] & 0x10 != 0) size += 10;
+    try short(reader.discardAll(size));
+    return header.len + size;
 }
 
 /// Frames are delimited here, so only packet framing is meaningful.
@@ -536,15 +559,19 @@ test "malformed metadata" {
         error.TruncatedData,
         decodeBytes(original[0..20], .{}),
     );
-    try testing.expectError(
-        error.UnsupportedFormat,
-        decodeBytes("ID3\x03", .{}),
-    );
 }
 
-fn decodeSamples(allocator: std.mem.Allocator, file: []const u8) ![]f32 {
+fn decodeSamples(
+    allocator: std.mem.Allocator,
+    file: []const u8,
+    seekable: bool,
+) ![]f32 {
     var reader = std.Io.Reader.fixed(file);
-    var decoder = try Decoder.init(allocator, Source.fromFixed(&reader));
+    const source = if (seekable)
+        Source.fromFixed(&reader)
+    else
+        Source.fromReader(&reader);
+    var decoder = try Decoder.init(allocator, source);
     defer decoder.deinit();
     const channels = decoder.info().channels;
     const total: usize = @intCast(decoder.info().total_frames.?);
@@ -582,7 +609,7 @@ fn expectSeek(decoder: *Decoder, samples: []const f32, frame: u64) !void {
 
 test "seeking lands exactly on any frame, with or without a seek table" {
     for (fixtures) |file| {
-        const samples = try decodeSamples(testing.allocator, file);
+        const samples = try decodeSamples(testing.allocator, file, true);
         defer testing.allocator.free(samples);
         var reader = std.Io.Reader.fixed(file);
         var decoder = try Decoder.init(
@@ -613,7 +640,7 @@ test "seeking lands exactly on any frame, with or without a seek table" {
 
 test "seeking uses the seek table instead of decoding from the start" {
     var file = fixtures[5][0..fixtures[5].len].*;
-    const samples = try decodeSamples(testing.allocator, &file);
+    const samples = try decodeSamples(testing.allocator, &file, true);
     defer testing.allocator.free(samples);
     // Frames before the point at sample 9216 are destroyed.
     @memset(file[180 + 16..9668 + 180 - 16], 0);
@@ -690,5 +717,131 @@ test "packets after a seek carry the landing timestamp" {
         try testing.expectEqual(pair[1], anchor.frame);
         const event = try packets.next();
         try testing.expectEqual(pair[1], event.packet.timestamp.?.value);
+    }
+}
+
+/// An ID3v2.4 tag in front of a file; its payload is sync-like bytes that
+/// must never be scanned.
+const Tag = struct { size: u32, footer: bool = false };
+
+fn withTags(
+    allocator: std.mem.Allocator,
+    tags: []const Tag,
+    file: []const u8,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (tags) |tag| {
+        const flags: u8 = if (tag.footer) 0x10 else 0;
+        try out.appendSlice(allocator, &.{ 'I', 'D', '3', 4, 0, flags });
+        for ([_]u5{ 21, 14, 7, 0 }) |shift| {
+            try out.append(allocator, @intCast(tag.size >> shift & 0x7F));
+        }
+        try out.appendNTimes(allocator, 0xFF, tag.size);
+        if (tag.footer) try out.appendNTimes(allocator, 0, 10);
+    }
+    try out.appendSlice(allocator, file);
+    return out.toOwnedSlice(allocator);
+}
+
+const tag_sets = [_][]const Tag{
+    &.{},
+    &.{.{ .size = 0 }},
+    &.{.{ .size = 1000 }},
+    &.{.{ .size = 100_000 }},
+    &.{.{ .size = 7, .footer = true }},
+    &.{ .{ .size = 5 }, .{ .size = 300, .footer = true } },
+};
+
+test "ID3v2 tags in front of a file change nothing" {
+    for (fixtures) |file| {
+        const plain = try decodeSamples(testing.allocator, file, true);
+        defer testing.allocator.free(plain);
+        for (tag_sets) |tags| {
+            const tagged = try withTags(testing.allocator, tags, file);
+            defer testing.allocator.free(tagged);
+            for ([_]bool{ true, false }) |seekable| {
+                const samples = try decodeSamples(
+                    testing.allocator,
+                    tagged,
+                    seekable,
+                );
+                defer testing.allocator.free(samples);
+                try testing.expectEqualSlices(f32, plain, samples);
+            }
+        }
+    }
+}
+
+test "seeking works behind ID3v2 tags" {
+    for ([_]usize{ 0, 5 }) |which| {
+        const plain = try decodeSamples(
+            testing.allocator,
+            fixtures[which],
+            true,
+        );
+        defer testing.allocator.free(plain);
+        for (tag_sets[1..]) |tags| {
+            const tagged = try withTags(
+                testing.allocator,
+                tags,
+                fixtures[which],
+            );
+            defer testing.allocator.free(tagged);
+            var reader = std.Io.Reader.fixed(tagged);
+            var decoder = try Decoder.init(
+                testing.allocator,
+                Source.fromFixed(&reader),
+            );
+            defer decoder.deinit();
+            const total = decoder.info().total_frames.?;
+            for ([_]u64{ total, 9300, 2304, 1, total - 1, 0, 6000 }) |frame| {
+                if (frame <= total) try expectSeek(&decoder, plain, frame);
+            }
+        }
+    }
+}
+
+test "malformed or incomplete ID3v2 tags are rejected" {
+    const cases = [_]struct { bytes: []const u8, err: anyerror }{
+        .{
+            .bytes = "ID3\x04\x00\x00\x00\x00\x00\x80",
+            .err = error.InvalidData,
+        },
+        .{
+            .bytes = "ID3\x04\x00\x00\x00\x00\x00\x64abc",
+            .err = error.TruncatedData,
+        },
+        .{
+            .bytes = "ID3\x04\x00\x00\x00\x00\x00\x00",
+            .err = error.TruncatedData,
+        },
+        .{ .bytes = "ID3\x04\x00\x00\x00\x00\x00", .err = error.TruncatedData },
+        .{
+            .bytes = "ID3\x04\x00\x00\x00\x00\x00\x00RIFF",
+            .err = error.UnsupportedFormat,
+        },
+    };
+    for (cases) |case| {
+        var reader = std.Io.Reader.fixed(case.bytes);
+        try testing.expectError(
+            case.err,
+            Decoder.init(testing.allocator, Source.fromFixed(&reader)),
+        );
+    }
+}
+
+test "every truncation of a tagged file is an error" {
+    const tagged = try withTags(
+        testing.allocator,
+        &.{.{ .size = 20 }},
+        fixtures[0],
+    );
+    defer testing.allocator.free(tagged);
+    for (0..tagged.len) |length| {
+        if (decodeBytes(tagged[0..length], .{})) |_| {
+            return error.TestUnexpectedResult;
+        } else |_| {
+        }
     }
 }

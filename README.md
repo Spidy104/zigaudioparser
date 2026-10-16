@@ -108,7 +108,7 @@ The goal is to read, decode, convert, encode, and write mainstream audio formats
 - [ ] MP3 streams.
 - [ ] Ogg container.
 - [ ] ADTS.
-- [x] FLAC (native files with seeking).
+- [x] FLAC (native files with seeking and id3v2 prefixes).
 - [ ] M4A.
 - [ ] AIFF.
 - [ ] AIFC.
